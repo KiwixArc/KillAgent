@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="appOrbitGrad" x1="16" y1="16" x2="112" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A8DADC"/>
+      <stop offset="50%" stop-color="#B5179E" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#F72585" stop-opacity="0.5"/>
+    </linearGradient>
+    <linearGradient id="appOuterCrescent" x1="60" y1="22" x2="108" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3A86FF"/>
+      <stop offset="40%" stop-color="#7209B7"/>
+      <stop offset="100%" stop-color="#F72585"/>
+    </linearGradient>
+    <linearGradient id="appInnerCrescent" x1="44" y1="34" x2="84" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#06D6A0"/>
+      <stop offset="55%" stop-color="#00F5D4"/>
+      <stop offset="100%" stop-color="#00E5FF"/>
+    </linearGradient>
+    <linearGradient id="appStarGrad" x1="34" y1="50" x2="60" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#80FFDB"/>
+      <stop offset="100%" stop-color="#06D6A0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dashed Celestial Orbit -->
+  <circle cx="64" cy="64" r="54" stroke="url(#appOrbitGrad)" stroke-width="1.6" stroke-dasharray="4 4" stroke-linecap="round"/>
+
+  <!-- Outer Killa Crescent (Blue -> Purple -> Magenta) -->
+  <path d="M71 24C92 29.5 106 48.2 106 70C106 94.5 85.5 112 60 109.5C54.5 108.9 49.5 107.4 45 105.2C68.2 103.8 87.2 86 88.5 63C89.5 45.8 81.5 32.5 71 24Z"
+        fill="url(#appOuterCrescent)"/>
+
+  <!-- Inner Killa Crescent (Emerald -> Turquoise -> Cyan) -->
+  <path d="M57 36C71.5 41.5 80.5 54.5 79.5 70.2C78.5 86.2 65.5 97.5 48.8 95.8C46.2 95.4 43.5 94.8 41 93.8C56.2 92.2 67.5 80.5 68 65.5C68.5 52.5 63.2 43 57 36Z"
+        fill="url(#appInnerCrescent)"/>
+
+  <!-- Ch'asca 4-Point Star -->
+  <path d="M47 49C47 56.5 41 62.5 33.5 62.5C41 62.5 47 68.5 47 76C47 68.5 53 62.5 60.5 62.5C53 62.5 47 56.5 47 49Z"
+        fill="url(#appStarGrad)"/>
+  <circle cx="47" cy="62.5" r="2.2" fill="#FFFFFF"/>
+
+  <!-- Planetary Satellite Dots -->
+  <circle cx="92" cy="34" r="2.2" fill="#06D6A0"/>
+  <circle cx="30" cy="84" r="1.8" fill="#F72585"/>
+</svg>
+
