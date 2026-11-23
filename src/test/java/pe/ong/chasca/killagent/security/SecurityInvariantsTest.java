@@ -23,12 +23,9 @@ class SecurityInvariantsTest {
                 false,
                 "./keystore/loopback.p12",
                 "changeit",
-                Set.of("https://chasca.ong.pe", "http://localhost:5173"),
+                Set.of("https://chaska.ong.pe", "http://localhost:5173"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
-                false,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "auto",
                 true
         );
@@ -36,13 +33,13 @@ class SecurityInvariantsTest {
         OriginValidator validator = new OriginValidator(config);
 
         // Legitimate origins (including case variations and default port 443)
-        assertTrue(validator.isAllowed("https://chasca.ong.pe"));
-        assertTrue(validator.isAllowed("HTTPS://CHASCA.ONG.PE:443"));
+        assertTrue(validator.isAllowed("https://chaska.ong.pe"));
+        assertTrue(validator.isAllowed("HTTPS://CHASKA.ONG.PE:443"));
         assertTrue(validator.isAllowed("http://localhost:5173"));
 
         // Spoofing & attack vectors must be strictly rejected
-        assertFalse(validator.isAllowed("https://chasca.ong.pe.evil.com"));
-        assertFalse(validator.isAllowed("http://chasca.ong.pe")); // Downgrade HTTP instead of HTTPS
+        assertFalse(validator.isAllowed("https://chaska.ong.pe.evil.com"));
+        assertFalse(validator.isAllowed("http://chaska.ong.pe")); // Downgrade HTTP instead of HTTPS
         assertFalse(validator.isAllowed("http://localhost:3000")); // Wrong port
         assertFalse(validator.isAllowed("null"));
         assertFalse(validator.isAllowed(""));
@@ -58,33 +55,31 @@ class SecurityInvariantsTest {
                 false,
                 "./keystore/loopback.p12",
                 "changeit",
-                Set.of("https://*.pages.dev", "https://*.chasca.ong.pe", "http://localhost:*"),
+                Set.of("https://*.pages.dev", "https://*.workers.dev", "https://*.chaska.ong.pe", "http://localhost:*"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
-                false,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "auto",
                 true
         );
 
         OriginValidator validator = new OriginValidator(config);
 
-        assertTrue(validator.isAllowed("https://chasca-webapp.pages.dev"));
-        assertTrue(validator.isAllowed("https://pr-42.chasca-webapp.pages.dev:443"));
-        assertTrue(validator.isAllowed("https://app.chasca.ong.pe"));
+        assertTrue(validator.isAllowed("https://chaska-webapp.pages.dev"));
+        assertTrue(validator.isAllowed("https://chaska-webapp.example.workers.dev"));
+        assertTrue(validator.isAllowed("https://pr-42.chaska-webapp.pages.dev:443"));
+        assertTrue(validator.isAllowed("https://app.chaska.ong.pe"));
         assertTrue(validator.isAllowed("http://localhost:5173"));
         assertTrue(validator.isAllowed("http://localhost:4173"));
 
         // Must reject insecure schemes, root suffixes without subdomain, and spoofed suffixes
-        assertFalse(validator.isAllowed("http://chasca-webapp.pages.dev"));
+        assertFalse(validator.isAllowed("http://chaska-webapp.pages.dev"));
         assertFalse(validator.isAllowed("https://pages.dev"));
-        assertFalse(validator.isAllowed("https://chasca-webapp.pages.dev.evil.com"));
+        assertFalse(validator.isAllowed("https://chaska-webapp.pages.dev.evil.com"));
         assertFalse(validator.isAllowed("https://evil.com"));
     }
 
     @Test
-    void testProductionRejectsWildcardOriginsAndMockHardware() {
+    void testProductionRejectsWildcardOrigins() {
         assertThrows(SecurityException.class, () -> new AgentConfig(
                 "production",
                 3000,
@@ -95,26 +90,6 @@ class SecurityInvariantsTest {
                 Set.of("*"),
                 "dni2.dll",
                 "dni3.dll",
-                false,
-                "71234567",
-                "USER",
-                "auto",
-                false
-        ));
-
-        assertThrows(SecurityException.class, () -> new AgentConfig(
-                "production",
-                3000,
-                "127.0.0.1",
-                false,
-                "./ks.p12",
-                "pw",
-                Set.of("https://chasca.ong.pe"),
-                "dni2.dll",
-                "dni3.dll",
-                true, // Mock forbidden in production
-                "71234567",
-                "USER",
                 "auto",
                 false
         ));
@@ -159,9 +134,6 @@ class SecurityInvariantsTest {
                 Set.of("http://localhost:5173"),
                 "dni2.dll",
                 "dni3.dll",
-                true,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "auto",
                 false
         );
@@ -176,4 +148,3 @@ class SecurityInvariantsTest {
         assertNotNull(ctx2);
     }
 }
-

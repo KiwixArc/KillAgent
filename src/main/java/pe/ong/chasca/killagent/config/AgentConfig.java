@@ -19,14 +19,27 @@ public record AgentConfig(
         Set<String> allowedOrigins,
         String reniecPkcs11DllPathDni2,
         String reniecPkcs11DllPathDni3,
-        boolean mockHardwareEnabled,
-        String mockDniSimulated,
-        String mockUserFullName,
-        String mockPin,
         String uiTheme,
         boolean showBalloonNotifications,
-        DocumentDigestSignMode documentDigestSignMode
+        DocumentDigestSignMode documentDigestSignMode,
+        boolean updateEnabled,
+        boolean updateAutoCheckEnabled,
+        String updateChannel,
+        String updateManifestUrl,
+        int updateCheckIntervalHours,
+        String updateSigningPublicKey,
+        Set<String> updateAllowedHosts
 ) {
+    public static final String DEFAULT_UPDATE_MANIFEST_URL =
+            "https://github.com/KiwixArc/KillAgent/releases/latest/download/update-manifest.json";
+
+    public static final Set<String> DEFAULT_UPDATE_ALLOWED_HOSTS = Set.of(
+            "github.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "api.github.com"
+    );
+
     /**
      * Defines how the 32-byte SHA-256 documentHash is signed by the RSA private key.
      */
@@ -63,21 +76,31 @@ public record AgentConfig(
             throw new SecurityException("Zero Trust violation: wildcard '*' is strictly forbidden in ALLOWED_ORIGINS in production.");
         }
 
-        if (isProd && mockHardwareEnabled) {
-            throw new SecurityException("Zero Trust violation: MOCK_HARDWARE_ENABLED cannot be active in production environment.");
-        }
-
         allowedOrigins = Collections.unmodifiableSet(new LinkedHashSet<>(allowedOrigins));
-        if (mockPin == null || mockPin.isBlank()) {
-            mockPin = "123456";
-        }
         if (documentDigestSignMode == null) {
             documentDigestSignMode = DocumentDigestSignMode.PADES_DIGEST_INFO;
         }
+        if (updateChannel == null || updateChannel.isBlank()) {
+            updateChannel = "stable";
+        } else {
+            updateChannel = updateChannel.trim().toLowerCase();
+        }
+        if (updateManifestUrl == null || updateManifestUrl.isBlank()) {
+            updateManifestUrl = DEFAULT_UPDATE_MANIFEST_URL;
+        } else {
+            updateManifestUrl = updateManifestUrl.trim();
+        }
+        updateCheckIntervalHours = Math.max(1, updateCheckIntervalHours);
+        updateSigningPublicKey = updateSigningPublicKey != null ? updateSigningPublicKey.trim() : "";
+
+        Set<String> hostsSource = (updateAllowedHosts == null || updateAllowedHosts.isEmpty())
+                ? DEFAULT_UPDATE_ALLOWED_HOSTS
+                : updateAllowedHosts;
+        updateAllowedHosts = Collections.unmodifiableSet(new LinkedHashSet<>(hostsSource));
     }
 
     /**
-     * Convenience constructor with default mock PIN and standard PAdES digest mode.
+     * Convenience constructor defaulting PAdES digest framing and GitHub Releases auto-update settings.
      */
     public AgentConfig(
             String environment,
@@ -89,9 +112,6 @@ public record AgentConfig(
             Set<String> allowedOrigins,
             String reniecPkcs11DllPathDni2,
             String reniecPkcs11DllPathDni3,
-            boolean mockHardwareEnabled,
-            String mockDniSimulated,
-            String mockUserFullName,
             String uiTheme,
             boolean showBalloonNotifications
     ) {
@@ -105,13 +125,16 @@ public record AgentConfig(
                 allowedOrigins,
                 reniecPkcs11DllPathDni2,
                 reniecPkcs11DllPathDni3,
-                mockHardwareEnabled,
-                mockDniSimulated,
-                mockUserFullName,
-                "123456",
                 uiTheme,
                 showBalloonNotifications,
-                DocumentDigestSignMode.PADES_DIGEST_INFO
+                DocumentDigestSignMode.PADES_DIGEST_INFO,
+                true,
+                true,
+                "stable",
+                DEFAULT_UPDATE_MANIFEST_URL,
+                6,
+                "",
+                DEFAULT_UPDATE_ALLOWED_HOSTS
         );
     }
 

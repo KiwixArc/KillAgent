@@ -3,64 +3,68 @@ package pe.ong.chasca.killagent.ui;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pe.ong.chasca.killagent.config.AgentConfig;
-import pe.ong.chasca.killagent.crypto.AuthChallengeResult;
+import pe.ong.chasca.killagent.config.AgentVersion;
 import pe.ong.chasca.killagent.crypto.CryptoService;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
 import pe.ong.chasca.killagent.hardware.CardType;
 import pe.ong.chasca.killagent.hardware.HardwareListener;
 import pe.ong.chasca.killagent.hardware.HardwareStatus;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
 import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
+import pe.ong.chasca.killagent.system.WindowsStartupManager;
+import pe.ong.chasca.killagent.update.UpdateService;
 
 import javax.swing.*;
 import java.awt.*;
+import java.util.function.BooleanSupplier;
 import java.util.function.IntSupplier;
 
 /**
  * Manages Windows 11 Taskbar System Tray presence, dynamic SVG state icon rendering,
- * masked cardholder identity status pill, and contextual operational actions.
+ * masked cardholder identity status pill, auto-start toggle, update notifications,
+ * and contextual operational actions.
  */
 public class SystemTrayManager implements HardwareListener {
 
     private static final Logger logger = LoggerFactory.getLogger(SystemTrayManager.class);
-    private static final String TEST_CHALLENGE_NONCE =
-            "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
 
     private final AgentConfig config;
     private final CardReaderManager readerManager;
     private final Pkcs11Bridge pkcs11Bridge;
-    private final MockHardwareService mockHardwareService;
     private final CryptoService cryptoService;
     private final PinPromptProvider pinPromptProvider;
+    private final UpdateService updateService;
     private final Runnable restartServerAction;
     private final Runnable exitAction;
 
     private volatile IntSupplier activeConnectionsSupplier = () -> 0;
+    private volatile BooleanSupplier externalBusySupplier = () -> false;
     private volatile boolean busySigning = false;
 
     private TrayIcon trayIcon;
     private MenuItem statusHeaderItem;
     private MenuItem readerDetailItem;
-    private MenuItem toggleSandboxItem;
-    private MenuItem simulateCardToggleItem;
+    private MenuItem updateMenuItem;
+    private CheckboxMenuItem autoStartItem;
     private DiagnosticsDialog diagnosticsDialog;
+    private UpdateDialog updateDialog;
+    private volatile UpdateService.UpdateCheckResult latestUpdateResult;
 
     public SystemTrayManager(
             AgentConfig config,
             CardReaderManager readerManager,
             Pkcs11Bridge pkcs11Bridge,
-            MockHardwareService mockHardwareService,
             CryptoService cryptoService,
             PinPromptProvider pinPromptProvider,
+            UpdateService updateService,
             Runnable restartServerAction,
             Runnable exitAction
     ) {
         this.config = config;
         this.readerManager = readerManager;
         this.pkcs11Bridge = pkcs11Bridge;
-        this.mockHardwareService = mockHardwareService;
         this.cryptoService = cryptoService;
         this.pinPromptProvider = pinPromptProvider;
+        this.updateService = updateService;
         this.restartServerAction = restartServerAction;
         this.exitAction = exitAction;
 
@@ -71,6 +75,16 @@ public class SystemTrayManager implements HardwareListener {
         if (supplier != null) {
             this.activeConnectionsSupplier = supplier;
         }
+    }
+
+    public void setBusyCheckSupplier(BooleanSupplier supplier) {
+        if (supplier != null) {
+            this.externalBusySupplier = supplier;
+        }
+    }
+
+    public boolean isAnyOperationBusy() {
+        return busySigning || externalBusySupplier.getAsBoolean();
     }
 
     public void initialize() {
@@ -84,9 +98,9 @@ public class SystemTrayManager implements HardwareListener {
             PopupMenu popup = createPopupMenu();
 
             Image initialImage = AssetManager.getTrayIcon(determineCurrentState());
-            trayIcon = new TrayIcon(initialImage, "KILLAgent — Ch'asca Zero Trust Anchor", popup);
+            trayIcon = new TrayIcon(initialImage, "KILLAgent — Ch'aska Zero Trust Anchor", popup);
             trayIcon.setImageAutoSize(true);
-            trayIcon.addActionListener(e -> openDiagnostics()); // Double-click opens Diagnostics
+            trayIcon.addActionListener(e -> openDiagnostics());
 
             tray.add(trayIcon);
             updateStatusDisplay();
@@ -107,6 +121,9 @@ public class SystemTrayManager implements HardwareListener {
         if (diagnosticsDialog != null) {
             SwingUtilities.invokeLater(() -> diagnosticsDialog.dispose());
         }
+        if (updateDialog != null) {
+            SwingUtilities.invokeLater(() -> updateDialog.dispose());
+        }
     }
 
     private PopupMenu createPopupMenu() {
@@ -121,6 +138,10 @@ public class SystemTrayManager implements HardwareListener {
         readerDetailItem.setEnabled(false);
         popup.add(readerDetailItem);
 
+        MenuItem versionItem = new MenuItem("KILLAgent v" + AgentVersion.getVersion() + " (" + config.updateChannel() + ")");
+        versionItem.setEnabled(false);
+        popup.add(versionItem);
+
         popup.addSeparator();
 
         // 2. Open Diagnostics Panel
@@ -128,21 +149,34 @@ public class SystemTrayManager implements HardwareListener {
         diagItem.addActionListener(e -> openDiagnostics());
         popup.add(diagItem);
 
-        // 3. Local Test Verification
-        MenuItem testVerifyItem = new MenuItem("Probar Verificación PIN");
-        testVerifyItem.addActionListener(e -> runTestVerificationAsync());
-        popup.add(testVerifyItem);
+        // 3. Check Updates
+        updateMenuItem = new MenuItem("Buscar Actualizaciones...");
+        updateMenuItem.addActionListener(e -> checkUpdatesInteractive());
+        popup.add(updateMenuItem);
 
-        // 4. Development Sandbox Controls (Strictly visible only when ENVIRONMENT=development)
-        if (config.isDevelopment()) {
-            popup.addSeparator();
-            toggleSandboxItem = new MenuItem("Conmutar a Modo Sandbox");
-            toggleSandboxItem.addActionListener(e -> toggleSandbox());
-            popup.add(toggleSandboxItem);
-
-            simulateCardToggleItem = new MenuItem("Simular Retiro de DNIe (Kill-Switch)");
-            simulateCardToggleItem.addActionListener(e -> toggleSimulatedCardPresence());
-            popup.add(simulateCardToggleItem);
+        // 4. Windows Auto-Start Checkbox
+        if (WindowsStartupManager.isSupported()) {
+            autoStartItem = new CheckboxMenuItem(
+                    "Iniciar automáticamente con Windows",
+                    WindowsStartupManager.isAutoStartEnabled()
+            );
+            autoStartItem.addItemListener(e -> {
+                boolean desired = autoStartItem.getState();
+                boolean updated = WindowsStartupManager.setAutoStartEnabled(desired);
+                if (!updated) {
+                    autoStartItem.setState(WindowsStartupManager.isAutoStartEnabled());
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
+                            null,
+                            "No se pudo modificar el inicio automático.\nEjecute KILLAgent desde su instalador (.exe / .msi) o JAR compilado.",
+                            "Inicio Automático",
+                            JOptionPane.WARNING_MESSAGE
+                    ));
+                }
+                if (diagnosticsDialog != null && diagnosticsDialog.isVisible()) {
+                    diagnosticsDialog.refreshDiagnostics();
+                }
+            });
+            popup.add(autoStartItem);
         }
 
         popup.addSeparator();
@@ -178,10 +212,9 @@ public class SystemTrayManager implements HardwareListener {
                         config,
                         readerManager,
                         pkcs11Bridge,
-                        mockHardwareService,
-                        cryptoService,
+                        updateService,
                         activeConnectionsSupplier,
-                        this::runTestVerificationAsync
+                        this::checkUpdatesInteractive
                 );
             }
             diagnosticsDialog.refreshDiagnostics();
@@ -190,80 +223,57 @@ public class SystemTrayManager implements HardwareListener {
         });
     }
 
-    private void runTestVerificationAsync() {
-        Thread worker = new Thread(() -> {
-            HardwareStatus status = readerManager.getStatus();
-            if (!status.cardPresent()) {
-                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
-                        null,
-                        "No hay ningún DNIe insertado en el lector.\nInserte su tarjeta inteligente para ejecutar la prueba.",
-                        "DNIe No Detectado",
-                        JOptionPane.WARNING_MESSAGE
-                ));
-                return;
+    public void checkUpdatesInteractive() {
+        SwingUtilities.invokeLater(() -> {
+            openUpdatesDialog(latestUpdateResult);
+            if (updateDialog != null) {
+                updateDialog.runCheckAsync();
             }
-
-            setBusyState(true);
-            try {
-                PinPromptProvider.PinPromptResult prompt = pinPromptProvider.requestPin(
-                        "Verificación Local de Diagnóstico",
-                        "Verificación local de salud del chip DNIe y validación de PIN."
-                );
-
-                if (!prompt.isConfirmed()) {
-                    return;
-                }
-
-                AuthChallengeResult result = cryptoService.signAuthChallenge(prompt.pin(), TEST_CHALLENGE_NONCE);
-                updateStatusDisplay();
-
-                SwingUtilities.invokeLater(() -> {
-                    if (diagnosticsDialog != null && diagnosticsDialog.isVisible()) {
-                        diagnosticsDialog.refreshDiagnostics();
-                    }
-                    JOptionPane.showMessageDialog(
-                            null,
-                            "¡Verificación criptográfica RSA-2048 exitosa!\n\n"
-                                    + "Titular: " + result.metadata().getOrDefault("fullName", "N/A") + "\n"
-                                    + "DNI: *****" + maskDni(result.metadata().get("dni")) + "\n"
-                                    + "Serie Cert.: " + result.metadata().getOrDefault("certificateSerialNumber", "N/A") + "\n"
-                                    + "Vigente hasta: " + result.metadata().getOrDefault("validTo", "N/A"),
-                            "Diagnóstico de Verificación Exitoso",
-                            JOptionPane.INFORMATION_MESSAGE
-                    );
-                });
-            } catch (Exception ex) {
-                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
-                        null,
-                        "Fallo en la verificación criptográfica:\n" + ex.getMessage(),
-                        "Error Criptográfico",
-                        JOptionPane.ERROR_MESSAGE
-                ));
-            } finally {
-                setBusyState(false);
-                updateStatusDisplay();
-            }
-        }, "killagent-test-verify-worker");
-        worker.setDaemon(true);
-        worker.start();
+        });
     }
 
-    private void toggleSandbox() {
-        boolean nextState = !readerManager.isMockActive();
-        readerManager.setMockMode(nextState);
-        updateStatusDisplay();
-    }
-
-    private void toggleSimulatedCardPresence() {
-        if (!readerManager.isMockActive()) {
+    public void notifyUpdateAvailable(UpdateService.UpdateCheckResult result) {
+        if (result == null || !result.isUpdateAvailable()) {
             return;
         }
-        if (readerManager.getStatus().cardPresent()) {
-            readerManager.simulateMockCardRemoval();
-        } else {
-            readerManager.simulateMockCardInsertion();
+        this.latestUpdateResult = result;
+        SwingUtilities.invokeLater(() -> {
+            if (updateMenuItem != null) {
+                updateMenuItem.setLabel("★ Actualización Disponible (v" + result.availableVersion() + ")...");
+            }
+            if (diagnosticsDialog != null && diagnosticsDialog.isVisible()) {
+                diagnosticsDialog.refreshDiagnostics();
+            }
+            if (updateDialog != null && updateDialog.isVisible()) {
+                updateDialog.applyResult(result);
+            }
+            if (config.showBalloonNotifications() && trayIcon != null) {
+                String mandatoryPrefix = result.mandatory() ? "[Obligatoria] " : "";
+                trayIcon.displayMessage(
+                        "Actualización de KILLAgent Disponible",
+                        mandatoryPrefix + "Nueva versión v" + result.availableVersion()
+                                + " lista. Clic derecho -> Buscar Actualizaciones...",
+                        TrayIcon.MessageType.INFO
+                );
+            }
+        });
+    }
+
+    private void openUpdatesDialog(UpdateService.UpdateCheckResult result) {
+        if (updateDialog == null) {
+            updateDialog = new UpdateDialog(
+                    null,
+                    config,
+                    updateService,
+                    result,
+                    this::isAnyOperationBusy,
+                    exitAction
+            );
+        } else if (result != null) {
+            updateDialog.applyResult(result);
         }
-        updateStatusDisplay();
+        updateDialog.setVisible(true);
+        updateDialog.toFront();
     }
 
     public void setBusyState(boolean busy) {
@@ -280,7 +290,7 @@ public class SystemTrayManager implements HardwareListener {
 
             if (trayIcon != null) {
                 trayIcon.setImage(AssetManager.getTrayIcon(visualState));
-                trayIcon.setToolTip("KILLAgent — " + visualState.getDescription());
+                trayIcon.setToolTip("KILLAgent v" + AgentVersion.getVersion() + " — " + visualState.getDescription());
             }
 
             String activeDni = readerManager.getActiveCardholderDni();
@@ -291,8 +301,6 @@ public class SystemTrayManager implements HardwareListener {
             String header;
             if (busySigning) {
                 header = "● Operación criptográfica en curso..." + maskedDniSuffix;
-            } else if (status.isMock()) {
-                header = (status.cardPresent() ? "● Sandbox Activo (DNIe Virtual)" : "○ Sandbox (Sin tarjeta)") + maskedDniSuffix;
             } else if (!status.readerPresent()) {
                 header = "○ Sin lector de tarjetas conectado";
             } else if (!status.cardPresent()) {
@@ -310,17 +318,6 @@ public class SystemTrayManager implements HardwareListener {
                         : "Lector: No detectado";
                 readerDetailItem.setLabel(readerLabel);
             }
-            if (toggleSandboxItem != null) {
-                toggleSandboxItem.setLabel(status.isMock()
-                        ? "Desactivar Modo Sandbox (Usar Lector Físico)"
-                        : "Conmutar a Modo Sandbox");
-            }
-            if (simulateCardToggleItem != null) {
-                simulateCardToggleItem.setEnabled(status.isMock());
-                simulateCardToggleItem.setLabel(status.cardPresent()
-                        ? "Simular Retiro de DNIe (Kill-Switch)"
-                        : "Simular Inserción de DNIe");
-            }
             if (diagnosticsDialog != null && diagnosticsDialog.isVisible()) {
                 diagnosticsDialog.refreshDiagnostics();
             }
@@ -335,11 +332,6 @@ public class SystemTrayManager implements HardwareListener {
 
     private TrayIconFactory.TrayState determineCurrentState() {
         HardwareStatus status = readerManager.getStatus();
-        if (status.isMock()) {
-            return status.cardPresent()
-                    ? TrayIconFactory.TrayState.MOCK_SANDBOX
-                    : TrayIconFactory.TrayState.NO_CARD;
-        }
         if (!status.readerPresent()) {
             return TrayIconFactory.TrayState.NO_READER;
         }

@@ -2,6 +2,7 @@ package pe.ong.chasca.killagent.security;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import pe.ong.chasca.killagent.config.AppPaths;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -11,7 +12,6 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -198,10 +198,6 @@ public final class SingleInstanceLock implements AutoCloseable {
     }
 
     private static Path resolveDefaultLockPath() {
-        String localAppData = System.getenv("LOCALAPPDATA");
-        if (localAppData != null && !localAppData.isBlank()) {
-            return Paths.get(localAppData, "Chasca", "KILLAgent", "killagent.lock");
-        }
-        return Paths.get(System.getProperty("java.io.tmpdir"), "chasca-killagent.lock");
+        return AppPaths.lockFile();
     }
 }

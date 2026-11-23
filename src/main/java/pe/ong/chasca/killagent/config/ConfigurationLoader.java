@@ -4,20 +4,26 @@ import io.github.cdimascio.dotenv.Dotenv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
 import java.io.InputStream;
 import java.net.InetAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
  * Loads and resolves KILLAgent configuration following strict priority order:
- * System Environment Variables -> .env file -> config.properties default fallback.
+ * System Environment Variables -> Working-Dir .env -> Per-User AppData .env -> /config.properties fallback.
  */
 public final class ConfigurationLoader {
 
     private static final Logger logger = LoggerFactory.getLogger(ConfigurationLoader.class);
     private static final String DEFAULT_PROPERTIES_PATH = "/config.properties";
+    private static final String DEFAULT_ORIGINS =
+            "https://chaska.ong.pe,https://*.chaska.ong.pe,https://*.chaska.ngo,https://app.chaska.internal,"
+                    + "https://*.workers.dev,https://*.pages.dev,https://*.vercel.app,https://*.netlify.app,"
+                    + "https://*.up.railway.app,https://*.onrender.com,http://localhost:5173,http://127.0.0.1:5173";
 
     private ConfigurationLoader() {
         // Utility class
@@ -25,37 +31,60 @@ public final class ConfigurationLoader {
 
     public static AgentConfig load() {
         Properties defaults = loadDefaultProperties();
-        Dotenv dotenv = loadDotenv();
+        Dotenv localDotenv = loadDotenvFromDirectory(Paths.get("."));
+        Dotenv userDotenv = loadDotenvFromFile(AppPaths.userEnvFile());
 
-        String environment = resolve("ENVIRONMENT", dotenv, defaults, "development");
-        int port = parsePort(resolve("KILLAGENT_PORT", dotenv, defaults, "3000"));
-        String host = resolve("KILLAGENT_HOST", dotenv, defaults, "127.0.0.1");
+        String environment = resolve("ENVIRONMENT", localDotenv, userDotenv, defaults, "production");
+        int port = parsePositiveInt(resolve("KILLAGENT_PORT", localDotenv, userDotenv, defaults, "3000"), 3000, 65535);
+        String host = resolve("KILLAGENT_HOST", localDotenv, userDotenv, defaults, "127.0.0.1");
         validateLoopbackHost(host);
 
-        boolean secureWss = Boolean.parseBoolean(resolve("KILLAGENT_SECURE_WSS", dotenv, defaults, "false"));
-        String keystorePath = resolve("KILLAGENT_KEYSTORE_PATH", dotenv, defaults, "./keystore/loopback.p12");
-        String keystorePassword = resolveRaw("KILLAGENT_KEYSTORE_PASSWORD", dotenv, defaults, "changeit");
+        boolean secureWss = Boolean.parseBoolean(resolve("KILLAGENT_SECURE_WSS", localDotenv, userDotenv, defaults, "false"));
+        String keystorePath = resolve(
+                "KILLAGENT_KEYSTORE_PATH",
+                localDotenv,
+                userDotenv,
+                defaults,
+                AppPaths.defaultKeystoreFile().toString()
+        );
+        String keystorePassword = resolveRaw("KILLAGENT_KEYSTORE_PASSWORD", localDotenv, userDotenv, defaults, "changeit");
 
-        String originsRaw = resolve("ALLOWED_ORIGINS", dotenv, defaults, "http://localhost:5173,http://localhost:8080");
-        Set<String> allowedOrigins = Arrays.stream(originsRaw.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+        String originsRaw = resolve("ALLOWED_ORIGINS", localDotenv, userDotenv, defaults, DEFAULT_ORIGINS);
+        Set<String> allowedOrigins = parseCsvSet(originsRaw, false);
 
-        String dni2Dll = resolve("RENIEC_PKCS11_DLL_PATH_DNI2", dotenv, defaults, "C:\\Windows\\System32\\bit4ipki.dll");
-        String dni3Dll = resolve("RENIEC_PKCS11_DLL_PATH_DNI3", dotenv, defaults, "C:\\Program Files\\IDEMIA\\IDPlugClassic\\DLLs\\idplug-pkcs11.dll");
+        String dni2Dll = resolve("RENIEC_PKCS11_DLL_PATH_DNI2", localDotenv, userDotenv, defaults, "C:\\Windows\\System32\\bit4ipki.dll");
+        String dni3Dll = resolve("RENIEC_PKCS11_DLL_PATH_DNI3", localDotenv, userDotenv, defaults, "C:\\Program Files\\IDEMIA\\IDPlugClassic\\DLLs\\idplug-pkcs11.dll");
 
-        boolean isProd = "production".equalsIgnoreCase(environment);
-        boolean mockHardware = !isProd && Boolean.parseBoolean(resolve("MOCK_HARDWARE_ENABLED", dotenv, defaults, "false"));
-        String mockDni = resolve("MOCK_DNI_SIMULATED", dotenv, defaults, "71234567");
-        String mockFullName = resolve("MOCK_USER_FULL_NAME", dotenv, defaults, "JUAN PEREZ GARCIA");
-        String mockPin = resolve("MOCK_PIN", dotenv, defaults, "123456");
+        String uiTheme = resolve("UI_THEME", localDotenv, userDotenv, defaults, "auto");
+        boolean showBalloons = Boolean.parseBoolean(resolve("SHOW_BALLOON_NOTIFICATIONS", localDotenv, userDotenv, defaults, "true"));
 
-        String uiTheme = resolve("UI_THEME", dotenv, defaults, "auto");
-        boolean showBalloons = Boolean.parseBoolean(resolve("SHOW_BALLOON_NOTIFICATIONS", dotenv, defaults, "true"));
-
-        String digestModeStr = resolve("DOCUMENT_DIGEST_SIGN_MODE", dotenv, defaults, "PADES_DIGEST_INFO");
+        String digestModeStr = resolve("DOCUMENT_DIGEST_SIGN_MODE", localDotenv, userDotenv, defaults, "PADES_DIGEST_INFO");
         AgentConfig.DocumentDigestSignMode digestMode = parseDigestMode(digestModeStr);
+
+        boolean updateEnabled = Boolean.parseBoolean(resolve("UPDATE_ENABLED", localDotenv, userDotenv, defaults, "true"));
+        boolean updateAutoCheckEnabled = Boolean.parseBoolean(resolve("UPDATE_AUTO_CHECK_ENABLED", localDotenv, userDotenv, defaults, "true"));
+        String updateChannel = resolve("UPDATE_CHANNEL", localDotenv, userDotenv, defaults, "stable");
+        String updateManifestUrl = resolve(
+                "UPDATE_MANIFEST_URL",
+                localDotenv,
+                userDotenv,
+                defaults,
+                AgentConfig.DEFAULT_UPDATE_MANIFEST_URL
+        );
+        int updateIntervalHours = parsePositiveInt(
+                resolve("UPDATE_CHECK_INTERVAL_HOURS", localDotenv, userDotenv, defaults, "6"),
+                6,
+                168
+        );
+        String updateSigningPublicKey = resolve("UPDATE_SIGNING_PUBLIC_KEY", localDotenv, userDotenv, defaults, "");
+        String updateHostsRaw = resolve(
+                "UPDATE_ALLOWED_HOSTS",
+                localDotenv,
+                userDotenv,
+                defaults,
+                String.join(",", AgentConfig.DEFAULT_UPDATE_ALLOWED_HOSTS)
+        );
+        Set<String> updateAllowedHosts = parseCsvSet(updateHostsRaw, true);
 
         AgentConfig config = new AgentConfig(
                 environment,
@@ -67,22 +96,26 @@ public final class ConfigurationLoader {
                 allowedOrigins,
                 dni2Dll,
                 dni3Dll,
-                mockHardware,
-                mockDni,
-                mockFullName,
-                mockPin,
                 uiTheme,
                 showBalloons,
-                digestMode
+                digestMode,
+                updateEnabled,
+                updateAutoCheckEnabled,
+                updateChannel,
+                updateManifestUrl,
+                updateIntervalHours,
+                updateSigningPublicKey,
+                updateAllowedHosts
         );
 
-        logger.info("Configuration loaded: env={}, endpoint={}://{}:{}, mockHardware={}, digestMode={}",
+        logger.info("Configuration loaded: version={}, env={}, endpoint={}://{}:{}, digestMode={}, updateChannel={}",
+                AgentVersion.getVersion(),
                 config.environment(),
                 config.secureWss() ? "wss" : "ws",
                 config.host(),
                 config.port(),
-                config.mockHardwareEnabled(),
-                config.documentDigestSignMode());
+                config.documentDigestSignMode(),
+                config.updateChannel());
         return config;
     }
 
@@ -107,16 +140,27 @@ public final class ConfigurationLoader {
         }
     }
 
-    private static int parsePort(String raw) {
+    private static Set<String> parseCsvSet(String raw, boolean lowercase) {
+        if (raw == null || raw.isBlank()) {
+            return new LinkedHashSet<>();
+        }
+        return Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(s -> lowercase ? s.toLowerCase(Locale.ROOT) : s)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private static int parsePositiveInt(String raw, int fallback, int maxVal) {
         try {
-            int p = Integer.parseInt(raw);
-            if (p < 1 || p > 65535) {
-                throw new IllegalArgumentException("Port out of valid TCP range: " + p);
+            int val = Integer.parseInt(raw.trim());
+            if (val < 1 || val > maxVal) {
+                throw new IllegalArgumentException("Integer out of range [1, " + maxVal + "]: " + val);
             }
-            return p;
-        } catch (NumberFormatException e) {
-            logger.warn("Invalid KILLAGENT_PORT '{}', falling back to 3000", raw);
-            return 3000;
+            return val;
+        } catch (Exception e) {
+            logger.warn("Invalid integer config '{}', falling back to {}", raw, fallback);
+            return fallback;
         }
     }
 
@@ -129,17 +173,23 @@ public final class ConfigurationLoader {
         }
     }
 
-    private static String resolve(String key, Dotenv dotenv, Properties defaults, String fallback) {
-        return stripInlineComment(resolveRaw(key, dotenv, defaults, fallback));
+    private static String resolve(String key, Dotenv localDotenv, Dotenv userDotenv, Properties defaults, String fallback) {
+        return stripInlineComment(resolveRaw(key, localDotenv, userDotenv, defaults, fallback));
     }
 
-    private static String resolveRaw(String key, Dotenv dotenv, Properties defaults, String fallback) {
+    private static String resolveRaw(String key, Dotenv localDotenv, Dotenv userDotenv, Properties defaults, String fallback) {
         String val = System.getenv(key);
         if (val != null && !val.isBlank()) {
             return val.trim();
         }
-        if (dotenv != null) {
-            val = dotenv.get(key);
+        if (localDotenv != null) {
+            val = localDotenv.get(key);
+            if (val != null && !val.isBlank()) {
+                return val.trim();
+            }
+        }
+        if (userDotenv != null) {
+            val = userDotenv.get(key);
             if (val != null && !val.isBlank()) {
                 return val.trim();
             }
@@ -176,17 +226,23 @@ public final class ConfigurationLoader {
         return props;
     }
 
-    private static Dotenv loadDotenv() {
+    private static Dotenv loadDotenvFromDirectory(Path dir) {
+        return loadDotenvFromFile(dir.resolve(".env"));
+    }
+
+    private static Dotenv loadDotenvFromFile(Path envFile) {
         try {
-            File envFile = new File(".env");
-            if (envFile.exists()) {
+            if (envFile != null && Files.isRegularFile(envFile)) {
+                Path parent = envFile.toAbsolutePath().getParent();
                 return Dotenv.configure()
+                        .directory(parent != null ? parent.toString() : ".")
+                        .filename(envFile.getFileName().toString())
                         .ignoreIfMissing()
                         .ignoreIfMalformed()
                         .load();
             }
         } catch (Exception e) {
-            logger.warn("No .env file loaded: {}", e.getMessage());
+            logger.warn("Could not load .env from {}: {}", envFile, e.getMessage());
         }
         return null;
     }

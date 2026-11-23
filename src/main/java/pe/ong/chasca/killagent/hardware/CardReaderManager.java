@@ -16,14 +16,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Manages PC/SC smart card terminals (via native Windows WinSCard JNA on Windows or
  * {@code javax.smartcardio} fallback on other platforms), delivering sub-10ms event detection
- * for card insertion, card removal (Kill-Switch), and USB reader hot-plugging, as well as
- * interactive Sandbox hardware simulation.
+ * for card insertion, card removal (Kill-Switch), and USB reader hot-plugging.
  */
 public class CardReaderManager implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger(CardReaderManager.class);
-    private static final String SANDBOX_READER_NAME = "Virtual DNIe 3.0 Reader (Ch'asca Sandbox)";
-    private static final String SANDBOX_ATR_HEX = "3B7F96000080318065B085040120120FFF829000";
     private static final int MONITOR_WAIT_TIMEOUT_MS = 350;
 
     private final AgentConfig config;
@@ -36,8 +33,7 @@ public class CardReaderManager implements Runnable {
     private volatile Thread monitorThread;
     private volatile String activeReaderName;
     private volatile boolean cardCurrentlyPresent;
-    private volatile CardType currentCardType;
-    private volatile boolean mockActive;
+    private volatile CardType currentCardType = CardType.NONE;
     private volatile String lastDetectedAtrHex = "";
     private volatile String activeCardholderDni = null;
     private volatile String activeCardholderName = null;
@@ -49,17 +45,6 @@ public class CardReaderManager implements Runnable {
     public CardReaderManager(AgentConfig config, HardwareProbe hardwareProbe) {
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.hardwareProbe = Objects.requireNonNull(hardwareProbe, "hardwareProbe must not be null");
-        this.mockActive = config.mockHardwareEnabled() && !config.isProduction();
-        if (this.mockActive) {
-            this.cardCurrentlyPresent = true;
-            this.currentCardType = CardType.DNIE_3_0;
-            this.lastDetectedAtrHex = SANDBOX_ATR_HEX;
-            this.activeCardholderDni = config.mockDniSimulated();
-            this.activeCardholderName = config.mockUserFullName();
-        } else {
-            this.cardCurrentlyPresent = false;
-            this.currentCardType = CardType.NONE;
-        }
     }
 
     private static HardwareProbe createDefaultProbe() {
@@ -88,16 +73,6 @@ public class CardReaderManager implements Runnable {
 
     public HardwareStatus getStatus() {
         synchronized (stateLock) {
-            if (mockActive) {
-                return new HardwareStatus(
-                        true,
-                        cardCurrentlyPresent,
-                        SANDBOX_READER_NAME,
-                        cardCurrentlyPresent ? CardType.DNIE_3_0 : CardType.NONE,
-                        true
-                );
-            }
-
             String name = activeReaderName;
             boolean readerPresent = name != null;
             return new HardwareStatus(readerPresent, cardCurrentlyPresent, name, currentCardType, false);
@@ -131,14 +106,12 @@ public class CardReaderManager implements Runnable {
 
     public void start() {
         if (running.compareAndSet(false, true)) {
-            if (!mockActive) {
-                probeOnce(false);
-            }
+            probeOnce(false);
             Thread thread = new Thread(this, "killagent-pcsc-monitor");
             thread.setDaemon(true);
             this.monitorThread = thread;
             thread.start();
-            logger.info("PC/SC CardReaderManager monitor thread started (mockActive={}).", mockActive);
+            logger.info("PC/SC CardReaderManager monitor thread started (env={}).", config.environment());
         }
     }
 
@@ -158,126 +131,12 @@ public class CardReaderManager implements Runnable {
         }
     }
 
-    /**
-     * Toggles Sandbox / Mock hardware mode (restricted strictly to non-production environments).
-     */
-    public void setMockMode(boolean enabled) {
-        if (enabled && config.isProduction()) {
-            throw new SecurityException("Cannot enable Mock Hardware mode in production environment.");
-        }
-
-        List<Runnable> pendingEvents = new ArrayList<>();
-        synchronized (stateLock) {
-            if (this.mockActive == enabled) {
-                return;
-            }
-
-            this.mockActive = enabled;
-            logger.info("Hardware mode switched. Mock Sandbox active: {}", enabled);
-
-            if (enabled) {
-                this.activeReaderName = null;
-                this.cardCurrentlyPresent = true;
-                this.currentCardType = CardType.DNIE_3_0;
-                this.lastDetectedAtrHex = SANDBOX_ATR_HEX;
-                this.activeCardholderDni = config.mockDniSimulated();
-                this.activeCardholderName = config.mockUserFullName();
-                pendingEvents.add(() -> notifyReaderStatus(true, SANDBOX_READER_NAME));
-                pendingEvents.add(() -> notifyCardInserted(SANDBOX_READER_NAME, CardType.DNIE_3_0));
-            } else {
-                boolean wasCardPresent = this.cardCurrentlyPresent;
-                clearCardIdentity();
-                this.cardCurrentlyPresent = false;
-                this.currentCardType = CardType.NONE;
-                this.activeReaderName = null;
-                if (wasCardPresent) {
-                    pendingEvents.add(() -> notifyCardRemoved(SANDBOX_READER_NAME));
-                }
-            }
-        }
-
-        dispatchEvents(pendingEvents);
-
-        if (!enabled) {
-            hardwareProbe.cancelPendingWait();
-            probeOnce(true);
-
-            boolean noReaderPresent;
-            synchronized (stateLock) {
-                noReaderPresent = !mockActive && activeReaderName == null;
-                if (noReaderPresent) {
-                    this.cardCurrentlyPresent = false;
-                    this.currentCardType = CardType.NONE;
-                    clearCardIdentity();
-                }
-            }
-            if (noReaderPresent) {
-                notifyReaderStatus(false, null);
-            }
-        }
-    }
-
-    /**
-     * Simulates physical DNIe insertion when running in Sandbox mode.
-     */
-    public void simulateMockCardInsertion() {
-        boolean inserted = false;
-        synchronized (stateLock) {
-            if (!mockActive) {
-                return;
-            }
-            if (!cardCurrentlyPresent) {
-                cardCurrentlyPresent = true;
-                currentCardType = CardType.DNIE_3_0;
-                lastDetectedAtrHex = SANDBOX_ATR_HEX;
-                activeCardholderDni = config.mockDniSimulated();
-                activeCardholderName = config.mockUserFullName();
-                inserted = true;
-            }
-        }
-        if (inserted) {
-            logger.info("[Sandbox] Simulated DNIe CARD_INSERTED event.");
-            notifyCardInserted(SANDBOX_READER_NAME, CardType.DNIE_3_0);
-        }
-    }
-
-    /**
-     * Simulates physical DNIe removal (Kill-Switch trigger) when running in Sandbox mode.
-     */
-    public void simulateMockCardRemoval() {
-        boolean removed = false;
-        synchronized (stateLock) {
-            if (!mockActive) {
-                return;
-            }
-            if (cardCurrentlyPresent) {
-                cardCurrentlyPresent = false;
-                currentCardType = CardType.NONE;
-                clearCardIdentity();
-                removed = true;
-            }
-        }
-        if (removed) {
-            logger.info("[Sandbox] Simulated DNIe CARD_REMOVED (Kill-Switch) event.");
-            notifyCardRemoved(SANDBOX_READER_NAME);
-        }
-    }
-
-    public boolean isMockActive() {
-        return mockActive;
-    }
-
     @Override
     public void run() {
         this.monitorThread = Thread.currentThread();
         try {
             while (running.get()) {
                 try {
-                    if (mockActive) {
-                        Thread.sleep(500);
-                        continue;
-                    }
-
                     probeOnce(true);
                     if (!running.get()) {
                         break;
@@ -306,12 +165,9 @@ public class CardReaderManager implements Runnable {
         }
     }
 
-    void probeOnce(boolean emitEvents) {
+    public void probeOnce(boolean emitEvents) {
         HardwareProbe.Snapshot snapshot;
         synchronized (probeLock) {
-            if (mockActive) {
-                return;
-            }
             try {
                 snapshot = hardwareProbe.probe();
             } catch (Exception e) {
@@ -326,10 +182,6 @@ public class CardReaderManager implements Runnable {
         List<Runnable> pendingEvents = new ArrayList<>();
 
         synchronized (stateLock) {
-            if (mockActive) {
-                return;
-            }
-
             List<HardwareProbe.ReaderSnapshot> readers = snapshot != null ? snapshot.readers() : List.of();
             if (readers.isEmpty()) {
                 collectNoReadersEventsLocked(emitEvents, pendingEvents);

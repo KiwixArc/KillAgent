@@ -11,9 +11,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
-import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
 import pe.ong.chasca.killagent.server.dto.ErrorCode;
+import pe.ong.chasca.killagent.testsupport.MutableTestHardwareProbe;
+import pe.ong.chasca.killagent.testsupport.TestSoftTokenPkcs11Bridge;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigInteger;
@@ -35,8 +35,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CryptoServicePadesAndAuthTest {
 
+    private MutableTestHardwareProbe hardwareProbe;
     private CardReaderManager readerManager;
-    private MockHardwareService mockHardwareService;
+    private TestSoftTokenPkcs11Bridge pkcs11Bridge;
     private CryptoService cryptoService;
 
     @BeforeEach
@@ -51,22 +52,20 @@ class CryptoServicePadesAndAuthTest {
                 Set.of("http://localhost:5173"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
-                true,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "auto",
                 false
         );
-        readerManager = new CardReaderManager(config);
-        Pkcs11Bridge pkcs11Bridge = new Pkcs11Bridge(config);
-        mockHardwareService = new MockHardwareService(config);
-        cryptoService = new CryptoService(config, readerManager, pkcs11Bridge, mockHardwareService);
+        hardwareProbe = new MutableTestHardwareProbe(true);
+        readerManager = new CardReaderManager(config, hardwareProbe);
+        readerManager.probeOnce(false);
+        pkcs11Bridge = new TestSoftTokenPkcs11Bridge(config, "71234567", "JUAN PEREZ GARCIA");
+        cryptoService = new CryptoService(config, readerManager, pkcs11Bridge);
     }
 
     @Test
     void testPadesDocumentDigestSignatureVerifiesAgainstOriginalPdfBytes() throws Exception {
         // Simulate a real PDF document's TBS (To-Be-Signed) byte stream
-        byte[] simulatedPdfBytes = "%PDF-1.7 Convenio de Cooperacion Tecnica Chasca 2026...".getBytes(StandardCharsets.UTF_8);
+        byte[] simulatedPdfBytes = "%PDF-1.7 Convenio de Cooperacion Tecnica Chaska 2026...".getBytes(StandardCharsets.UTF_8);
         byte[] sha256Bytes = MessageDigest.getInstance("SHA-256").digest(simulatedPdfBytes);
         String sha256Hex = HexFormat.of().formatHex(sha256Bytes);
 
@@ -146,8 +145,9 @@ class CryptoServicePadesAndAuthTest {
         assertEquals(0, ex3.getAttemptsRemaining());
 
         // Reset PIN counter, remove card, verify CARD_NOT_PRESENT
-        mockHardwareService.resetPinAttempts();
-        readerManager.simulateMockCardRemoval();
+        pkcs11Bridge.resetPinAttempts();
+        hardwareProbe.removeCard();
+        readerManager.probeOnce(true);
 
         CryptoOperationException exRemoved = assertThrows(CryptoOperationException.class,
                 () -> cryptoService.signAuthChallenge(new char[]{'1', '2', '3', '4'}, "a4f891e204b7c9103f8a12d4e5678901"));

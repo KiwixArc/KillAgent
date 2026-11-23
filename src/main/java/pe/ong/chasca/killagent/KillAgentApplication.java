@@ -7,16 +7,18 @@ import com.sun.jna.platform.win32.WinReg;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pe.ong.chasca.killagent.config.AgentConfig;
+import pe.ong.chasca.killagent.config.AgentVersion;
 import pe.ong.chasca.killagent.config.ConfigurationLoader;
 import pe.ong.chasca.killagent.crypto.CryptoService;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
 import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
 import pe.ong.chasca.killagent.security.SingleInstanceLock;
 import pe.ong.chasca.killagent.server.KillAgentWebSocketServer;
+import pe.ong.chasca.killagent.system.LoggingBootstrap;
 import pe.ong.chasca.killagent.ui.PinPromptProvider;
 import pe.ong.chasca.killagent.ui.SwingPinPromptProvider;
 import pe.ong.chasca.killagent.ui.SystemTrayManager;
+import pe.ong.chasca.killagent.update.UpdateService;
 
 import javax.swing.*;
 import java.awt.*;
@@ -28,24 +30,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * KILLAgent entrypoint and lifecycle coordinator.
  * Lightweight, zero-footprint desktop background daemon (< 45 MB idle RAM, < 500 ms startup)
- * serving as the Zero Trust physical hardware anchor for the Ch'asca platform on Windows.
+ * serving as the Zero Trust physical hardware anchor for the Ch'aska platform on Windows.
  */
 public class KillAgentApplication {
 
-    private static final Logger logger = LoggerFactory.getLogger(KillAgentApplication.class);
     private static final String WIN_PERSONALIZE_REG_KEY =
             "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
     private static final String WIN_LIGHT_THEME_VALUE = "AppsUseLightTheme";
 
     private static final AtomicBoolean shuttingDown = new AtomicBoolean(false);
 
+    private static Logger logger;
     private static SingleInstanceLock instanceLock;
     private static AgentConfig activeConfig;
     private static CardReaderManager cardReaderManager;
     private static Pkcs11Bridge pkcs11Bridge;
-    private static MockHardwareService mockHardwareService;
     private static CryptoService cryptoService;
     private static PinPromptProvider pinPromptProvider;
+    private static UpdateService updateService;
     private static SystemTrayManager trayManager;
     private static volatile KillAgentWebSocketServer server;
 
@@ -53,73 +55,77 @@ public class KillAgentApplication {
         long startNanos = System.nanoTime();
         System.setProperty("sun.java2d.dpiaware", "true");
 
+        if (hasArg(args, "--version", "-v")) {
+            System.out.println("KILLAgent " + AgentVersion.getVersion() + " (Ch'aska Zero Trust Platform)");
+            return;
+        }
+
         boolean forceStart = hasArg(args, "--force", "-f");
         boolean stopOnly = hasArg(args, "--stop", "--kill", "-k");
 
-        instanceLock = new SingleInstanceLock();
-
-        // Handle --stop / --kill command
         if (stopOnly) {
+            instanceLock = new SingleInstanceLock();
             handleStopCommand();
             return;
         }
 
-        // Handle --force: terminate existing instance before starting
+        // Configure file logging rotation before any SLF4J logger initializes for the daemon
+        LoggingBootstrap.configure();
+        logger = LoggerFactory.getLogger(KillAgentApplication.class);
+
+        instanceLock = new SingleInstanceLock();
+
         if (forceStart) {
             handleForceTermination();
         }
 
-        // 1. Acquire OS single-instance lock
         if (!instanceLock.tryAcquire()) {
             handleDuplicateInstanceDetected();
             return;
         }
 
-        logger.info("Starting KILLAgent Zero Trust Desktop Daemon (PID: {})...", ProcessHandle.current().pid());
+        logger.info("Starting KILLAgent v{} Zero Trust Desktop Daemon (PID: {})...",
+                AgentVersion.getVersion(), ProcessHandle.current().pid());
 
         try {
-            // 2. Load hierarchical configuration (System Env -> .env -> config.properties)
             activeConfig = ConfigurationLoader.load();
-
-            // 3. Configure FlatLaf Windows 11 Look & Feel (light, dark, or auto Windows Registry sync)
             setupTheme(activeConfig.uiTheme());
 
-            // 4. Initialize Hardware, PKCS#11, Sandbox (dev-only), and Crypto services
             cardReaderManager = new CardReaderManager(activeConfig);
             pkcs11Bridge = new Pkcs11Bridge(activeConfig);
-            mockHardwareService = activeConfig.isDevelopment() ? new MockHardwareService(activeConfig) : null;
-            cryptoService = new CryptoService(activeConfig, cardReaderManager, pkcs11Bridge, mockHardwareService);
+            cryptoService = new CryptoService(activeConfig, cardReaderManager, pkcs11Bridge);
             pinPromptProvider = new SwingPinPromptProvider();
+            updateService = new UpdateService(activeConfig);
 
-            // 5. Initialize Windows System Tray
             trayManager = new SystemTrayManager(
                     activeConfig,
                     cardReaderManager,
                     pkcs11Bridge,
-                    mockHardwareService,
                     cryptoService,
                     pinPromptProvider,
+                    updateService,
                     KillAgentApplication::restartServer,
                     KillAgentApplication::exitApplication
             );
             trayManager.setActiveConnectionsSupplier(() -> server != null ? server.getActiveConnectionCount() : 0);
+            trayManager.setBusyCheckSupplier(() -> server != null && server.isHardwareOperationInProgress());
             SwingUtilities.invokeLater(trayManager::initialize);
 
-            // 6. Start Loopback WebSocket / WSS Server
             startServer();
-
-            // 7. Start PC/SC WinSCard hardware monitoring thread
             cardReaderManager.start();
 
-            // 8. Register idempotent JVM shutdown hook
             Runtime.getRuntime().addShutdownHook(new Thread(KillAgentApplication::shutdown, "killagent-shutdown-hook"));
-
-            // 9. Start interactive console listener (allows typing 'q' or 'stop' in terminal to exit cleanly)
             startConsoleInputListener();
 
+            updateService.startBackgroundChecks(
+                    () -> trayManager.isAnyOperationBusy(),
+                    trayManager::notifyUpdateAvailable
+            );
+
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
-            logger.info("KILLAgent daemon operational in {} ms (Target SLA: < 500 ms).", elapsedMs);
-            System.out.println("[KILLAgent] En ejecución en la bandeja del sistema (System Tray).");
+            logger.info("KILLAgent v{} daemon operational in {} ms (Target SLA: < 500 ms).",
+                    AgentVersion.getVersion(), elapsedMs);
+            System.out.println("[KILLAgent v" + AgentVersion.getVersion() + "] En ejecución en la bandeja del sistema (System Tray).");
             System.out.println("[KILLAgent] Para detener: presione Ctrl+C, escriba 'q' y Enter, o clic derecho en el icono -> Salir.");
         } catch (Throwable fatal) {
             logger.error("Fatal error during KILLAgent startup: {}", fatal.getMessage(), fatal);
@@ -161,7 +167,7 @@ public class KillAgentApplication {
             logger.info("Flag --force detectado. Finalizando instancia previa (PID: {})...", pid);
             instanceLock.killActiveInstance(true);
             try {
-                Thread.sleep(500); // Allow OS to release port and file handles
+                Thread.sleep(500);
             } catch (InterruptedException ignored) {
             }
         }
@@ -171,12 +177,14 @@ public class KillAgentApplication {
         Optional<Long> pidOpt = instanceLock.getActiveInstancePid();
         String pidStr = pidOpt.map(String::valueOf).orElse("desconocido");
 
-        logger.warn("Another instance of KILLAgent is already running on this workstation (PID: {}). Exiting.", pidStr);
+        if (logger != null) {
+            logger.warn("Another instance of KILLAgent is already running on this workstation (PID: {}). Exiting.", pidStr);
+        }
         System.err.println("\n[AVISO] Ya existe una instancia de KILLAgent ejecutándose en segundo plano (PID: " + pidStr + ").");
         System.err.println("Opciones para gestionarla:");
         System.err.println("  1. Haz clic derecho en el icono de KILLAgent en la barra de tareas (junto al reloj) y selecciona 'Salir'.");
-        System.err.println("  2. Para reiniciar forzosamente: java -jar target\\killagent-1.0.0-SNAPSHOT.jar --force");
-        System.err.println("  3. Para detener la instancia actual: java -jar target\\killagent-1.0.0-SNAPSHOT.jar --stop");
+        System.err.println("  2. Para reiniciar forzosamente: KILLAgent.exe --force");
+        System.err.println("  3. Para detener la instancia actual: KILLAgent.exe --stop");
         System.err.println("  4. O desde PowerShell: Stop-Process -Id " + pidStr + " -Force\n");
 
         if (!GraphicsEnvironment.isHeadless()) {
@@ -240,8 +248,13 @@ public class KillAgentApplication {
         if (!shuttingDown.compareAndSet(false, true)) {
             return;
         }
-        logger.info("Executing clean KILLAgent daemon shutdown sequence...");
+        if (logger != null) {
+            logger.info("Executing clean KILLAgent daemon shutdown sequence...");
+        }
 
+        if (updateService != null) {
+            updateService.stop();
+        }
         if (pinPromptProvider != null) {
             pinPromptProvider.abortActivePromptForCardRemoval();
         }
@@ -262,7 +275,9 @@ public class KillAgentApplication {
             instanceLock.close();
         }
 
-        logger.info("KILLAgent daemon terminated cleanly.");
+        if (logger != null) {
+            logger.info("KILLAgent daemon terminated cleanly.");
+        }
     }
 
     private static void setupTheme(String themePreference) {
@@ -273,7 +288,6 @@ public class KillAgentApplication {
             } else if ("dark".equalsIgnoreCase(themePreference)) {
                 useLight = false;
             } else {
-                // 'auto': Sync dynamically with Windows 10/11 OS theme preference
                 useLight = isWindowsLightThemeEnabled();
             }
 

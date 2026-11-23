@@ -48,16 +48,17 @@ public class Pkcs11Bridge {
 
     /**
      * Scoped PKCS#11 cryptographic session that automatically logs out of the
-     * hardware token
-     * and unregisters the ephemeral provider upon completion.
+     * hardware token and unregisters the ephemeral provider upon completion.
      */
-    public final class Pkcs11Session implements AutoCloseable {
+    public static final class Pkcs11Session implements AutoCloseable {
         private final Provider provider;
         private final KeyStore keyStore;
+        private final Runnable closeAction;
 
-        private Pkcs11Session(Provider provider, KeyStore keyStore) {
+        public Pkcs11Session(Provider provider, KeyStore keyStore, Runnable closeAction) {
             this.provider = provider;
             this.keyStore = keyStore;
+            this.closeAction = closeAction;
         }
 
         public Provider provider() {
@@ -70,7 +71,9 @@ public class Pkcs11Bridge {
 
         @Override
         public void close() {
-            logoutAndUnload(provider);
+            if (closeAction != null) {
+                closeAction.run();
+            }
         }
     }
 
@@ -170,10 +173,11 @@ public class Pkcs11Bridge {
                 KeyStore keyStore = KeyStore.getInstance("PKCS11", slotProvider);
                 keyStore.load(null, pin);
 
-                this.activeProvider = slotProvider;
+                final Provider loadedProvider = slotProvider;
+                this.activeProvider = loadedProvider;
                 logger.info("PKCS#11 session authenticated on slotListIndex={} (purpose={}) using {}",
                         slotIndex, effectivePurpose, libraryFile.getName());
-                return new Pkcs11Session(slotProvider, keyStore);
+                return new Pkcs11Session(loadedProvider, keyStore, () -> logoutAndUnload(loadedProvider));
             } catch (Throwable t) {
                 logoutAndUnload(slotProvider);
                 CryptoOperationException mapped = CryptoOperationException.fromPkcs11Exception(t, fallbackAttempts);

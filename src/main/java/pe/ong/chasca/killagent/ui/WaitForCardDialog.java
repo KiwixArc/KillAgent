@@ -95,7 +95,7 @@ public class WaitForCardDialog extends JDialog {
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
         mainPanel.setBorder(new EmptyBorder(20, 26, 20, 26));
 
-        // 1. Top Branding Row (Zero Trust Shield Badge + Ch'asca Wordmark)
+        // 1. Top Branding Row (Zero Trust Shield Badge + Ch'aska Wordmark)
         JPanel brandPanel = DialogUiSupport.createBrandPanel();
         if (brandPanel != null) {
             mainPanel.add(brandPanel);

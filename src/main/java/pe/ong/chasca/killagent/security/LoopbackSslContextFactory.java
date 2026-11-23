@@ -101,7 +101,7 @@ public final class LoopbackSslContextFactory {
         Date notAfter = Date.from(now.plus(825, ChronoUnit.DAYS)); // Browser max TLS validity window (~825 days)
         BigInteger serial = new BigInteger(128, new SecureRandom()).abs();
 
-        X500Name dn = new X500Name("CN=127.0.0.1, OU=KILLAgent Loopback Anchor, O=Chasca Zero Trust, C=PE");
+        X500Name dn = new X500Name("CN=127.0.0.1, OU=KILLAgent Loopback Anchor, O=Chaska Zero Trust, C=PE");
 
         JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
                 dn,

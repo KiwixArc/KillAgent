@@ -83,7 +83,7 @@ public class AntiKeyloggerKeypadDialog extends JDialog {
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
         mainPanel.setBorder(new EmptyBorder(20, 26, 20, 26));
 
-        // 1. Top Branding Row (Zero Trust Shield Badge + Ch'asca Wordmark)
+        // 1. Top Branding Row (Zero Trust Shield Badge + Ch'aska Wordmark)
         JPanel brandPanel = DialogUiSupport.createBrandPanel();
         if (brandPanel != null) {
             mainPanel.add(brandPanel);
@@ -158,7 +158,7 @@ public class AntiKeyloggerKeypadDialog extends JDialog {
 
         okButton = new JButton("Confirmar PIN");
         okButton.setFont(new Font("Segoe UI", Font.BOLD, 13));
-        okButton.setBackground(new Color(114, 9, 183)); // Ch'asca Cosmic Purple (#7209B7)
+        okButton.setBackground(new Color(114, 9, 183)); // Ch'aska Cosmic Purple (#7209B7)
         okButton.setForeground(Color.WHITE);
         okButton.setEnabled(false);
         okButton.setFocusable(false);

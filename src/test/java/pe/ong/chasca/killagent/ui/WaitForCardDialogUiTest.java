@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
+import pe.ong.chasca.killagent.testsupport.MutableTestHardwareProbe;
 
 import javax.swing.*;
 import java.awt.*;
@@ -17,9 +18,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class WaitForCardDialogUiTest {
 
-    private static AgentConfig createConfig(boolean mockEnabled) {
+    private static AgentConfig createConfig() {
         return new AgentConfig(
-                "development",
+                "production",
                 3000,
                 "127.0.0.1",
                 false,
@@ -28,9 +29,6 @@ class WaitForCardDialogUiTest {
                 Set.of("http://localhost:5173"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
-                mockEnabled,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "dark",
                 false
         );
@@ -41,8 +39,10 @@ class WaitForCardDialogUiTest {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "Swing modal tests require non-headless display");
         FlatDarkLaf.setup();
 
-        CardReaderManager readerManager = new CardReaderManager(createConfig(true));
-        readerManager.simulateMockCardRemoval();
+        MutableTestHardwareProbe probe = new MutableTestHardwareProbe(false);
+        probe.removeCard();
+        CardReaderManager readerManager = new CardReaderManager(createConfig(), probe);
+        readerManager.probeOnce(false);
         assertFalse(readerManager.getStatus().cardPresent());
 
         AtomicReference<CardWaitProvider.WaitOutcome> outcomeRef = new AtomicReference<>();
@@ -51,7 +51,7 @@ class WaitForCardDialogUiTest {
                     null,
                     readerManager,
                     "Inicio de Sesión",
-                    "Autenticación Institucional Ch&#39;asca",
+                    "Autenticación Institucional Ch&#39;aska",
                     30
             );
             dialog.addWindowListener(new WindowAdapter() {
@@ -59,7 +59,10 @@ class WaitForCardDialogUiTest {
                 public void windowOpened(WindowEvent e) {
                     javax.swing.Timer insertTimer = new javax.swing.Timer(
                             60,
-                            evt -> readerManager.simulateMockCardInsertion()
+                            evt -> {
+                                probe.insertCard();
+                                readerManager.probeOnce(true);
+                            }
                     );
                     insertTimer.setRepeats(false);
                     insertTimer.start();
@@ -77,7 +80,9 @@ class WaitForCardDialogUiTest {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "Swing modal tests require non-headless display");
         FlatDarkLaf.setup();
 
-        CardReaderManager readerManager = new CardReaderManager(createConfig(false));
+        MutableTestHardwareProbe probe = new MutableTestHardwareProbe(false);
+        CardReaderManager readerManager = new CardReaderManager(createConfig(), probe);
+        readerManager.probeOnce(false);
         assertFalse(readerManager.getStatus().readerPresent());
 
         AtomicReference<CardWaitProvider.WaitOutcome> outcomeRef = new AtomicReference<>();
@@ -86,7 +91,7 @@ class WaitForCardDialogUiTest {
                     null,
                     readerManager,
                     "Inicio de Sesión",
-                    "Autenticación Institucional Ch&#39;asca",
+                    "Autenticación Institucional Ch&#39;aska",
                     30
             );
             dialog.addWindowListener(new WindowAdapter() {

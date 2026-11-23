@@ -1,6 +1,6 @@
 # 🛡️ Guía de Integración Frontend para KILLAgent
 **Zero Trust Hardware Anchor & PKCS#11 DNIe WebSocket Protocol**  
-*Plataforma Ch'asca — Gestión Documental y Firma Digital*
+*Plataforma Ch'aska — Gestión Documental y Firma Digital*
 
 ---
 
@@ -13,7 +13,7 @@
 │  Navegador Web (SPA)     │                  │  Estación de Trabajo (KILLAgent)       │
 │  React / TypeScript      │                  │  Java 21 LTS (Loopback 127.0.0.1:3000) │
 │                          │  ws:// / wss://  │                                        │
-│  • Ch'asca Web App       │◄────────────────►│  • Servidor WebSocket Loopback         │
+│  • Ch'aska Web App       │◄────────────────►│  • Servidor WebSocket Loopback         │
 │  • Solicitud de Retos    │                  │  • Modal PIN Anti-Keylogger (Zero-Str) │
 │  • Escucha de Kill-Switch│                  │  • Middleware IDEMIA PKCS#11           │
 └──────────────────────────┘                  └──────────────────┬─────────────────────┘
@@ -25,7 +25,7 @@
 ### Invariantes Fundamentales para el Frontend
 1. **Zero Network Traversal de PIN:** El frontend **NUNCA** solicita ni gestiona el PIN del DNIe del usuario. El PIN se ingresa **exclusivamente** en el modal seguro del agente de escritorio protegido contra capturas de pantalla y keyloggers.
 2. **Loopback Estricto:** La URL de conexión siempre apunta a `127.0.0.1` o `localhost`. Nunca a direcciones IP de red local ni dominios externos.
-3. **Validación de Origen (Anti-CSWSH):** El agente valida la cabecera `Origin` enviada por el navegador contra su lista blanca (`ALLOWED_ORIGINS`). Si tu origen web (ej. `http://localhost:5173` o `https://app.chasca.pe`) no está en el `.env` del agente, la conexión será rechazada inmediatamente.
+3. **Validación de Origen (Anti-CSWSH):** El agente valida la cabecera `Origin` enviada por el navegador contra su lista blanca (`ALLOWED_ORIGINS`). Si tu origen web (ej. `http://localhost:5173` o `https://app.chaska.pe`) no está en el `.env` del agente, la conexión será rechazada inmediatamente.
 
 ---
 
@@ -117,7 +117,7 @@ Utilizado en el inicio de sesión institucional (Fase 2) y en elevación de priv
   "nonce": "a4f891e204b7c9103f8a12d4e567890123456789abcdef0123456789abcdef01"
 }
 ```
-* **`nonce`**: Cadena hexadecimal de 64 caracteres (o bytes en Base64) provista por el backend de Ch'asca (`GET /api/v1/authentication/challenge`).
+* **`nonce`**: Cadena hexadecimal de 64 caracteres (o bytes en Base64) provista por el backend de Ch'aska (`GET /api/v1/authentication/challenge`).
 
 #### 2. Comportamiento en la Estación de Trabajo:
 El agente despliega sobre la pantalla del usuario el **teclado virtual aleatorizado** solicitando el PIN de autenticación.
@@ -143,7 +143,7 @@ El agente despliega sobre la pantalla del usuario el **teclado virtual aleatoriz
 }
 ```
 
-#### 4. Envío al Backend de Ch'asca:
+#### 4. Envío al Backend de Ch'aska:
 El frontend toma el contenido de `payload` y lo remite vía HTTP POST al backend:
 ```typescript
 await api.post('/api/v1/authentication/sign-in', {
@@ -192,7 +192,7 @@ Utilizado para el sellado digital de documentos PDF conforme al estándar **PAdE
 }
 ```
 
-#### 3. Envío al Backend de Ch'asca:
+#### 3. Envío al Backend de Ch'aska:
 El frontend remite el resultado al comando de registro de firma del backend:
 ```typescript
 await api.post('/api/v1/documents/signatures/register', payload);
@@ -637,7 +637,7 @@ export function DocumentSigningButton({ documentId, docHash, docTitle }: any) {
     try {
       const result = await signDocument("slot-123", docHash, docTitle, "ABOGADO");
       alert(`¡Documento firmado con éxito por DNI: ${result.certificateDni}!`);
-      // Enviar result a API Ch'asca...
+      // Enviar result a API Ch'aska...
     } catch (err: any) {
       if (err.errorCode === 'USER_CANCELLED') {
         console.log("Firma cancelada por el usuario.");
@@ -665,19 +665,4 @@ export function DocumentSigningButton({ documentId, docHash, docTitle }: any) {
 }
 ```
 
----
-
-## 9. Pruebas sin Hardware Físico (Modo Sandbox / Mock)
-
-Para desarrollar el frontend sin disponer de lector físico ni DNIe:
-1. En el archivo `.env` de `KILLAgent`, verifica:
-   ```ini
-   ENVIRONMENT=development
-   MOCK_HARDWARE_ENABLED=true
-   ```
-2. Al iniciar, el agente simula automáticamente un DNIe 3.0 virtual con DNI `71234567`.
-3. Al solicitar la firma en el frontend:
-   * **Cualquier PIN de 4 a 8 dígitos numéricos** es aceptado como correcto (ej. `123456`).
-   * **Ingresar `000000` (ceros)** simula intencionalmente `PIN_INCORRECT` y decrementa el contador de intentos para que puedas probar la respuesta de error y el bloqueo tras 3 intentos (`PIN_LOCKED`).
-4. Desde el icono del System Tray o el Panel de Diagnóstico, puedes hacer clic en **"Simular Retiro de DNIe"** para verificar que tu frontend maneja adecuadamente el evento `CARD_REMOVED` (Kill-Switch).
 

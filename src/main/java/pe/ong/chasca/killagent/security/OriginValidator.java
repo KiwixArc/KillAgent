@@ -92,7 +92,7 @@ public final class OriginValidator {
 
     /**
      * Canonicalizes an Origin string to 'scheme://host[:non-default-port]' in lowercase.
-     * Prevents prefix bypasses such as 'https://chasca.ong.pe.attacker.com'.
+     * Prevents prefix bypasses such as 'https://chaska.ong.pe.attacker.com'.
      */
     static String normalizeOrigin(String rawOrigin) {
         ParsedOrigin parsed = parseOrigin(rawOrigin);

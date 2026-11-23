@@ -2,60 +2,56 @@ package pe.ong.chasca.killagent.ui;
 
 import com.formdev.flatlaf.FlatClientProperties;
 import pe.ong.chasca.killagent.config.AgentConfig;
-import pe.ong.chasca.killagent.crypto.CryptoService;
+import pe.ong.chasca.killagent.config.AgentVersion;
+import pe.ong.chasca.killagent.config.AppPaths;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
 import pe.ong.chasca.killagent.hardware.HardwareStatus;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
 import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
+import pe.ong.chasca.killagent.system.WindowsStartupManager;
+import pe.ong.chasca.killagent.update.UpdateInstaller;
+import pe.ong.chasca.killagent.update.UpdateService;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.security.cert.X509Certificate;
+import java.nio.file.Files;
 import java.util.List;
-import java.util.Map;
 import java.util.function.IntSupplier;
 
 /**
  * Interactive Diagnostics & Hardware Health Dashboard for KILLAgent.
- * Displays PC/SC terminals, ATR, PKCS#11 driver resolution, certificate details,
- * active WebSocket sessions, and Sandbox Kill-Switch testing controls (in development).
+ * Displays PC/SC terminals, ATR, PKCS#11 driver resolution, runtime update status,
+ * Windows auto-start state, active WebSocket sessions, and Zero Trust origin rules.
  */
 public class DiagnosticsDialog extends JDialog {
 
     private final AgentConfig config;
     private final CardReaderManager readerManager;
     private final Pkcs11Bridge pkcs11Bridge;
-    private final MockHardwareService mockHardwareService;
-    private final CryptoService cryptoService;
+    private final UpdateService updateService;
     private final IntSupplier activeConnectionsSupplier;
-    private final Runnable testSignatureTrigger;
+    private final Runnable checkUpdatesAction;
 
     private final JTextArea infoArea;
-    private JButton simulateInsertBtn;
-    private JButton simulateRemoveBtn;
-    private JButton resetPinBtn;
 
     public DiagnosticsDialog(
             Frame parent,
             AgentConfig config,
             CardReaderManager readerManager,
             Pkcs11Bridge pkcs11Bridge,
-            MockHardwareService mockHardwareService,
-            CryptoService cryptoService,
+            UpdateService updateService,
             IntSupplier activeConnectionsSupplier,
-            Runnable testSignatureTrigger
+            Runnable checkUpdatesAction
     ) {
         super(parent, "KILLAgent — Panel de Diagnóstico Zero Trust", false);
         this.config = config;
         this.readerManager = readerManager;
         this.pkcs11Bridge = pkcs11Bridge;
-        this.mockHardwareService = mockHardwareService;
-        this.cryptoService = cryptoService;
+        this.updateService = updateService;
         this.activeConnectionsSupplier = activeConnectionsSupplier != null ? activeConnectionsSupplier : () -> 0;
-        this.testSignatureTrigger = testSignatureTrigger;
+        this.checkUpdatesAction = checkUpdatesAction;
 
-        setSize(640, 540);
+        setSize(650, 540);
         setMinimumSize(new Dimension(560, 460));
         setLocationRelativeTo(parent);
         setAlwaysOnTop(false);
@@ -78,7 +74,7 @@ public class DiagnosticsDialog extends JDialog {
         JLabel title = new JLabel("Diagnóstico de Hardware PC/SC & PKCS#11");
         title.setFont(new Font("Segoe UI", Font.BOLD, 16));
         title.setForeground(new Color(0, 245, 212));
-        JLabel subtitle = new JLabel("Ancla Criptográfica Local Ch'asca — Aislamiento Loopback 127.0.0.1");
+        JLabel subtitle = new JLabel("Ancla Criptográfica Local Ch'aska — Aislamiento Loopback 127.0.0.1");
         subtitle.setFont(new Font("Segoe UI", Font.PLAIN, 12));
         titleBox.add(title);
         titleBox.add(subtitle);
@@ -101,54 +97,22 @@ public class DiagnosticsDialog extends JDialog {
         scrollPane.putClientProperty(FlatClientProperties.STYLE, "arc: 10");
         content.add(scrollPane, BorderLayout.CENTER);
 
-        // 3. Bottom Controls (Sandbox Controls in Dev + Standard Actions)
-        JPanel bottomContainer = new JPanel(new BorderLayout(8, 8));
-        bottomContainer.setOpaque(false);
-
-        if (config.isDevelopment()) {
-            JPanel sandboxToolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-            sandboxToolbar.setBorder(BorderFactory.createTitledBorder("Simulador de Eventos Hardware (Sandbox / Dev)"));
-
-            simulateInsertBtn = new JButton("Insertar DNIe Virtual");
-            simulateInsertBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
-            simulateInsertBtn.addActionListener(e -> {
-                readerManager.simulateMockCardInsertion();
-                refreshDiagnostics();
-            });
-
-            simulateRemoveBtn = new JButton("Retirar DNIe (Kill-Switch)");
-            simulateRemoveBtn.setForeground(new Color(247, 37, 133));
-            simulateRemoveBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
-            simulateRemoveBtn.addActionListener(e -> {
-                readerManager.simulateMockCardRemoval();
-                refreshDiagnostics();
-            });
-
-            resetPinBtn = new JButton("Resetear PIN (3 intentos)");
-            resetPinBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
-            resetPinBtn.addActionListener(e -> {
-                if (mockHardwareService != null) {
-                    mockHardwareService.resetPinAttempts();
-                }
-                cryptoService.resetEstimatedPinAttempts();
-                refreshDiagnostics();
-            });
-
-            sandboxToolbar.add(simulateInsertBtn);
-            sandboxToolbar.add(simulateRemoveBtn);
-            sandboxToolbar.add(resetPinBtn);
-            bottomContainer.add(sandboxToolbar, BorderLayout.NORTH);
-        }
-
+        // 3. Bottom Controls
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
-        if (testSignatureTrigger != null) {
-            JButton testVerifyBtn = new JButton("Probar Verificación PIN");
-            testVerifyBtn.setFont(new Font("Segoe UI", Font.BOLD, 12));
-            testVerifyBtn.setBackground(new Color(114, 9, 183));
-            testVerifyBtn.setForeground(Color.WHITE);
-            testVerifyBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
-            testVerifyBtn.addActionListener(e -> testSignatureTrigger.run());
-            actions.add(testVerifyBtn);
+
+        JButton dataDirBtn = new JButton("Carpeta de Datos");
+        dataDirBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
+        dataDirBtn.addActionListener(e -> openDataDirectory());
+        actions.add(dataDirBtn);
+
+        if (checkUpdatesAction != null) {
+            JButton updatesBtn = new JButton("Buscar Actualizaciones");
+            updatesBtn.setFont(new Font("Segoe UI", Font.BOLD, 12));
+            updatesBtn.setBackground(new Color(114, 9, 183));
+            updatesBtn.setForeground(Color.WHITE);
+            updatesBtn.putClientProperty(FlatClientProperties.STYLE, "arc: 8");
+            updatesBtn.addActionListener(e -> this.checkUpdatesAction.run());
+            actions.add(updatesBtn);
         }
 
         JButton refreshBtn = new JButton("Actualizar");
@@ -161,9 +125,8 @@ public class DiagnosticsDialog extends JDialog {
 
         actions.add(refreshBtn);
         actions.add(closeBtn);
-        bottomContainer.add(actions, BorderLayout.SOUTH);
 
-        content.add(bottomContainer, BorderLayout.SOUTH);
+        content.add(actions, BorderLayout.SOUTH);
         setContentPane(content);
 
         refreshDiagnostics();
@@ -171,24 +134,31 @@ public class DiagnosticsDialog extends JDialog {
 
     public void refreshDiagnostics() {
         HardwareStatus status = readerManager.getStatus();
-        boolean isMock = status.isMock();
-
-        if (simulateInsertBtn != null) {
-            simulateInsertBtn.setEnabled(isMock && !status.cardPresent());
-            simulateRemoveBtn.setEnabled(isMock && status.cardPresent());
-            resetPinBtn.setEnabled(isMock);
-        }
-
         String scheme = config.secureWss() ? "wss" : "ws";
         StringBuilder sb = new StringBuilder();
 
         sb.append("┌── ESTADO DEL DAEMON KILLAGENT ────────────────────────────────────┐\n");
+        sb.append("  Versión Instalada:     ").append(AgentVersion.getDisplayVersion()).append("\n");
+        sb.append("  Modo de Ejecución:     ").append(UpdateInstaller.detectLaunchMode()).append("\n");
         sb.append("  Perfil de Entorno:     ").append(config.environment().toUpperCase()).append("\n");
         sb.append("  Endpoint Loopback:     ").append(scheme).append("://").append(config.host()).append(":").append(config.port()).append("\n");
         sb.append("  Transporte TLS (WSS):  ").append(config.secureWss() ? "HABILITADO (TLS 1.3/1.2)" : "DESHABILITADO (WS Local)").append("\n");
         sb.append("  Clientes WS Activos:   ").append(activeConnectionsSupplier.getAsInt()).append(" sesión(es)\n");
         sb.append("  Modo firma Digest:     ").append(config.documentDigestSignMode()).append("\n");
-        sb.append("  Modo Mock / Sandbox:   ").append(isMock ? "ACTIVO (Emulación Bouncy Castle)" : "INACTIVO (Hardware Físico)").append("\n\n");
+        sb.append("  Inicio con Windows:    ").append(WindowsStartupManager.isAutoStartEnabled() ? "HABILITADO" : "DESHABILITADO").append("\n\n");
+
+        sb.append("┌── SISTEMA DE ACTUALIZACIONES AUTOMÁTICAS ─────────────────────────┐\n");
+        sb.append("  Estado:                ").append(config.updateEnabled() ? "HABILITADO" : "DESHABILITADO").append("\n");
+        sb.append("  Canal / Intervalo:     ").append(config.updateChannel()).append(" (cada ").append(config.updateCheckIntervalHours()).append("h)\n");
+        sb.append("  Firma Ed25519:         ").append(!config.updateSigningPublicKey().isBlank() ? "ACTIVADA (Clave pública fijada)" : "NO FIJADA (Solo HTTPS + SHA-256)").append("\n");
+        sb.append("  Manifiesto Remoto:     ").append(config.updateManifestUrl()).append("\n");
+        UpdateService.UpdateCheckResult lastUpdate = updateService != null ? updateService.getLastResult() : null;
+        if (lastUpdate != null) {
+            sb.append("  Última Comprobación:   ").append(lastUpdate.status()).append(" — ").append(lastUpdate.message()).append("\n");
+        } else {
+            sb.append("  Última Comprobación:   Pendiente\n");
+        }
+        sb.append("\n");
 
         sb.append("┌── SUBSISTEMA SMART CARD (PC/SC WinSCard) ─────────────────────────┐\n");
         sb.append("  Lector Detectado:      ").append(status.readerPresent() ? "SÍ" : "NO").append("\n");
@@ -205,14 +175,6 @@ public class DiagnosticsDialog extends JDialog {
               .append(" (DNI: *****").append(maskLast3(holderDni)).append(")\n");
         }
         sb.append("\n");
-
-        if (isMock && mockHardwareService != null) {
-            sb.append("┌── CERTIFICADOS SINTÉTICOS SANDBOX (RENIEC PKI) ───────────────────┐\n");
-            sb.append("  Intentos PIN Restantes: ").append(mockHardwareService.getRemainingAttempts()).append(" / 3 (Nota: PIN '000000' simula fallo)\n");
-            appendCertSummary(sb, "Cert. Autenticación", mockHardwareService.getAuthCertificate());
-            appendCertSummary(sb, "Cert. Firma PAdES  ", mockHardwareService.getSignCertificate());
-            sb.append("\n");
-        }
 
         sb.append("┌── DRIVERS PKCS#11 EN ESTACIÓN DE TRABAJO WINDOWS ─────────────────┐\n");
         if (pkcs11Bridge != null) {
@@ -232,13 +194,21 @@ public class DiagnosticsDialog extends JDialog {
         infoArea.setCaretPosition(0);
     }
 
-    private void appendCertSummary(StringBuilder sb, String label, X509Certificate cert) {
-        if (cert == null) return;
-        Map<String, String> meta = CryptoService.extractCertificateMetadata(cert);
-        sb.append("  • ").append(label).append(": ")
-          .append(CryptoService.formatCanonicalReniecDn(cert))
-          .append("\n    Serial=").append(meta.get("certificateSerialNumber"))
-          .append(" | Vigente hasta=").append(meta.get("validTo")).append("\n");
+    private void openDataDirectory() {
+        try {
+            java.nio.file.Path dataDir = AppPaths.baseDataDir();
+            Files.createDirectories(dataDir);
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                Desktop.getDesktop().open(dataDir.toFile());
+            }
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "No se pudo abrir la carpeta de datos:\n" + AppPaths.baseDataDir(),
+                    "Carpeta de Datos",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+        }
     }
 
     private static String maskLast3(String dni) {

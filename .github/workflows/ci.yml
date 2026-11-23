@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Maven Test & Package (Java 21 Windows)
+    name: Maven Test, Package & Portable Smoke Check (Java 21 Windows)
     runs-on: windows-latest
 
     steps:
@@ -32,8 +32,12 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: Run tests and package shaded JAR
-        run: mvn -B clean package
+      - name: Run unit/integration tests and build portable Windows package
+        shell: pwsh
+        run: |
+          .\package-windows.ps1 -PackageType portable
+          .\dist\KILLAgent\KILLAgent.exe --version
+          java -jar (Get-Item dist\killagent-*.jar | Select-Object -First 1).FullName --version
 
       - name: Upload Surefire test reports on failure
         if: failure()
@@ -44,10 +48,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Upload shaded KILLAgent JAR artifact
+      - name: Upload KILLAgent portable & manifest artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: killagent-shaded-jar
-          path: target/killagent-*.jar
+          name: killagent-portable-dist
+          path: |
+            dist/*-portable.zip
+            dist/*.jar
+            dist/update-manifest.json
+            dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

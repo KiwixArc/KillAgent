@@ -5,10 +5,9 @@
 # del sistema (System Tray) en formatos vectoriales (.svg) o rasterizados (.png).
 #
 # Archivos estándar esperados:
-# - app-icon.png / app-icon.svg         -> Icono maestro de la aplicación (2048x2048 / escalable)
+# - app-icon.ico / .png / .svg          -> Icono maestro de la aplicación
 # - tray-no-reader.svg / .png           -> Estado: Sin lector conectado (Gris)
 # - tray-no-card.svg / .png             -> Estado: Lector conectado, esperando DNIe (Naranja)
-# - tray-card-ready.svg / .png          -> Estado: DNIe verificado y listo (Verde / Ch'asca Mint)
+# - tray-card-ready.svg / .png          -> Estado: DNIe verificado y listo (Verde / Ch'aska Mint)
 # - tray-busy.svg / .png                -> Estado: Operación de firma / PIN en curso (Azul Eléctrico)
-# - tray-sandbox.svg / .png             -> Estado: Modo Sandbox / Mock activo (Púrpura Cósmico)
 # ==============================================================================

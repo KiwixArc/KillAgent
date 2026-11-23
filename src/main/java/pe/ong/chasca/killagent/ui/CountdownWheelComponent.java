@@ -11,7 +11,7 @@ import java.awt.geom.Ellipse2D;
  */
 public class CountdownWheelComponent extends JComponent {
 
-    static final Color NORMAL_COUNTDOWN_COLOR = new Color(0, 245, 212);   // Ch'asca Mint (#00F5D4)
+    static final Color NORMAL_COUNTDOWN_COLOR = new Color(0, 245, 212);   // Ch'aska Mint (#00F5D4)
     static final Color WARNING_COUNTDOWN_COLOR = new Color(245, 158, 11); // Amber (#F59E0B)
     static final Color CRITICAL_COUNTDOWN_COLOR = new Color(247, 37, 133);// Neon Magenta (#F72585)
     static final Color DEFAULT_COUNTDOWN_LABEL_COLOR = new Color(140, 150, 165);

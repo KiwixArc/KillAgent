@@ -7,15 +7,16 @@
 
     <groupId>pe.ong.chasca</groupId>
     <artifactId>killagent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>KILLAgent</name>
-    <description>Zero Trust Hardware Anchor &amp; PKCS#11 Desktop Agent for Ch'asca Platform</description>
+    <description>Zero Trust Hardware Anchor &amp; PKCS#11 Desktop Agent for Ch'aska Platform</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <maven.build.timestamp.format>yyyy-MM-dd'T'HH:mm:ss'Z'</maven.build.timestamp.format>
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
@@ -76,7 +77,7 @@
             <version>1.4.0</version>
         </dependency>
 
-        <!-- Bouncy Castle (Sandbox / Mock DNIe & Crypto Utils) -->
+        <!-- Bouncy Castle (X.509 Certificate Metadata, Loopback TLS Provisioning & Crypto Utils) -->
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
@@ -128,6 +129,23 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>version.properties</exclude>
+                </excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>version.properties</include>
+                </includes>
+            </resource>
+        </resources>
+
         <plugins>
             <!-- Compiler Plugin -->
             <plugin>
@@ -158,6 +176,9 @@
                                     <mainClass>pe.ong.chasca.killagent.KillAgentApplication</mainClass>
                                     <manifestEntries>
                                         <Multi-Release>true</Multi-Release>
+                                        <Implementation-Title>KILLAgent</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                        <Implementation-Vendor>Ch'aska Zero Trust Platform</Implementation-Vendor>
                                     </manifestEntries>
                                 </transformer>
                             </transformers>

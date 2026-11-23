@@ -13,6 +13,7 @@ import org.java_websocket.server.WebSocketServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pe.ong.chasca.killagent.config.AgentConfig;
+import pe.ong.chasca.killagent.config.AgentVersion;
 import pe.ong.chasca.killagent.config.ConfigurationLoader;
 import pe.ong.chasca.killagent.crypto.AuthChallengeResult;
 import pe.ong.chasca.killagent.crypto.CryptoOperationException;
@@ -45,19 +46,19 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Hardened loopback-only (127.0.0.1) WebSocket / WSS server mediating Zero Trust cryptographic
- * operations between the Ch'asca React SPA and local PKCS#11 DNIe smart cards.
+ * operations between the Ch'aska React SPA and local PKCS#11 DNIe smart cards.
  */
 public class KillAgentWebSocketServer extends WebSocketServer implements HardwareListener {
 
     private static final Logger logger = LoggerFactory.getLogger(KillAgentWebSocketServer.class);
-    private static final String VERSION = "1.0.0";
+    private static final String VERSION = AgentVersion.getVersion();
     private static final int MAX_PAYLOAD_CHARS = 32_768;
     private static final int PIN_PROMPT_TIMEOUT_SECONDS = 30;
     private static final String STATION_BUSY_MESSAGE =
             "Ya existe una solicitud de verificación con PIN activa en esta estación.";
     private static final String DEFAULT_AUTH_OPERATION_TITLE = "Verificación de Seguridad DNIe";
     private static final String DEFAULT_AUTH_OPERATION_DESCRIPTION =
-            "Autenticación Institucional Ch'asca (Verificación DNIe)";
+            "Autenticación Institucional Ch'aska (Verificación DNIe)";
 
     private final AgentConfig config;
     private final CardReaderManager cardReaderManager;

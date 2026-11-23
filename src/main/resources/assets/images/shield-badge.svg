@@ -37,7 +37,7 @@
         stroke-width="1"
         stroke-opacity="0.25"/>
 
-  <!-- Ch'asca 8-Point Star Emblem Inside Shield -->
+  <!-- Ch'aska 8-Point Star Emblem Inside Shield -->
   <!-- Primary 4 Cardinal Points (Mint/Cyan) -->
   <path d="M64 26C64 47 47 64 26 64C47 64 64 81 64 102C64 81 81 64 102 64C81 64 64 47 64 26Z"
         fill="url(#starOuterCyan)"/>

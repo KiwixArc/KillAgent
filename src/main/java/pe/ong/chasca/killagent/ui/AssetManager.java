@@ -29,7 +29,7 @@ public final class AssetManager {
      * Priority:
      * 1. Vector SVG in /assets/icons/tray-*.svg
      * 2. Raster PNG in /assets/icons/tray-*.png
-     * 3. Procedural Killa/Ch'asca rendering via TrayIconFactory
+     * 3. Procedural Killa/Ch'aska rendering via TrayIconFactory
      */
     public static Image getTrayIcon(TrayIconFactory.TrayState state) {
         String baseName = switch (state) {
@@ -37,7 +37,6 @@ public final class AssetManager {
             case NO_CARD -> "tray-no-card";
             case CARD_READY -> "tray-card-ready";
             case BUSY_SIGNING -> "tray-busy";
-            case MOCK_SANDBOX -> "tray-sandbox";
         };
 
         // 1. Try native SVG vector asset first
@@ -52,7 +51,7 @@ public final class AssetManager {
             return pngImg;
         }
 
-        // 3. Fallback to procedural Killa/Ch'asca icon
+        // 3. Fallback to procedural Killa/Ch'aska icon
         return TrayIconFactory.createIcon(state);
     }
 
@@ -93,7 +92,7 @@ public final class AssetManager {
     }
 
     /**
-     * Returns the Ch'asca Zero Trust shield badge for security modals.
+     * Returns the Ch'aska Zero Trust shield badge for security modals.
      */
     public static ImageIcon getShieldBadge(int size) {
         Image svg = loadSvgImage("/assets/images/shield-badge.svg", size, size);

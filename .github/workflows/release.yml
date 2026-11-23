@@ -1,0 +1,160 @@
+name: KILLAgent Release & Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release SemVer without leading v (e.g. 1.0.1)'
+        required: true
+        type: string
+      channel:
+        description: 'Update channel'
+        required: true
+        default: 'stable'
+        type: choice
+        options:
+          - stable
+          - beta
+      mandatory:
+        description: 'Mark update as mandatory for installed agents'
+        required: false
+        default: false
+        type: boolean
+      minimum_supported_version:
+        description: 'Minimum supported version floor before update becomes mandatory'
+        required: false
+        default: '1.0.0'
+        type: string
+      release_notes:
+        description: 'Release notes summary included in update-manifest.json'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build, Sign & Publish Windows Release (MSI + Portable ZIP + Manifest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Ensure WiX Toolset v3 is installed
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            $wixPath = Get-ChildItem "C:\Program Files (x86)\WiX Toolset v3.*\bin" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if (-not $wixPath) {
+              choco install wixtoolset --version=3.14.0 -y
+              $wixPath = "C:\Program Files (x86)\WiX Toolset v3.14\bin"
+            }
+            if ($wixPath) {
+              Add-Content -Path $env:GITHUB_PATH -Value $wixPath
+            }
+          }
+
+      - name: Resolve release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $ver = "${{ inputs.version }}".Trim().TrimStart('v')
+            $channel = "${{ inputs.channel }}"
+            $mandatory = "${{ inputs.mandatory }}"
+            $minFloor = "${{ inputs.minimum_supported_version }}"
+            $notes = "${{ inputs.release_notes }}"
+          } else {
+            $ver = "${{ github.ref_name }}".Trim().TrimStart('v')
+            $channel = if ($ver -match '-') { "beta" } else { "stable" }
+            $mandatory = "false"
+            $minFloor = "1.0.0"
+            $notes = git log -1 --pretty=%B | Out-String
+          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "mandatory=$mandatory" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "min_floor=$minFloor" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $eof = "EOF_$([guid]::NewGuid().ToString('N'))"
+          "notes<<$eof" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $notes.Trim() | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "$eof" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Synchronize Maven version & verify tests
+        shell: pwsh
+        run: |
+          mvn -B versions:set "-DnewVersion=${{ steps.meta.outputs.version }}" -DgenerateBackupPoms=false
+          mvn -B clean test
+
+      - name: Build Windows MSI, Portable ZIP, Checksums & Update Manifest
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pkgParams = @{
+            PackageType             = "all"
+            AppVersion              = "${{ steps.meta.outputs.version }}"
+            Channel                 = "${{ steps.meta.outputs.channel }}"
+            MinimumSupportedVersion = "${{ steps.meta.outputs.min_floor }}"
+            ReleaseNotes            = @"
+          ${{ steps.meta.outputs.notes }}
+          "@
+            SkipTests               = $true
+          }
+          if ("${{ steps.meta.outputs.mandatory }}" -eq "true") {
+            $pkgParams["Mandatory"] = $true
+          }
+          .\package-windows.ps1 @pkgParams
+
+      - name: Smoke test native KILLAgent.exe --version and Ed25519 manifest signature
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ vars.UPDATE_SIGNING_PUBLIC_KEY }}
+        run: |
+          .\dist\KILLAgent\KILLAgent.exe --version
+          if ($env:UPDATE_SIGNING_PUBLIC_KEY) {
+            java scripts/ManifestSigner.java verify .\dist\update-manifest.json $env:UPDATE_SIGNING_PUBLIC_KEY
+          }
+
+      - name: Upload release distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: killagent-release-${{ steps.meta.outputs.version }}
+          path: |
+            dist/*.msi
+            dist/*-portable.zip
+            dist/*.jar
+            dist/update-manifest.json
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: KILLAgent v${{ steps.meta.outputs.version }}
+          prerelease: ${{ steps.meta.outputs.channel == 'beta' }}
+          generate_release_notes: true
+          files: |
+            dist/*.msi
+            dist/*-portable.zip
+            dist/*.jar
+            dist/update-manifest.json
+            dist/SHA256SUMS.txt

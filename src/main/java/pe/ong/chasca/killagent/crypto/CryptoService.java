@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
 import pe.ong.chasca.killagent.hardware.HardwareStatus;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
 import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
 import pe.ong.chasca.killagent.server.dto.ErrorCode;
 
@@ -29,8 +28,8 @@ import java.util.regex.Pattern;
 
 /**
  * Core Zero Trust cryptographic mediator coordinating physical RENIEC DNIe (PKCS#11)
- * and in-memory Sandbox operations with strict certificate KeyUsage enforcement,
- * RFC 8017 PAdES DigestInfo framing, and deterministic PIN memory zeroization.
+ * operations with strict certificate KeyUsage enforcement, RFC 8017 PAdES DigestInfo
+ * framing, and deterministic PIN memory zeroization.
  */
 public class CryptoService {
 
@@ -40,19 +39,16 @@ public class CryptoService {
     private final AgentConfig config;
     private final CardReaderManager cardReaderManager;
     private final Pkcs11Bridge pkcs11Bridge;
-    private final MockHardwareService mockHardwareService;
     private final AtomicInteger hardwarePinAttemptEstimator = new AtomicInteger(3);
 
     public CryptoService(
             AgentConfig config,
             CardReaderManager cardReaderManager,
-            Pkcs11Bridge pkcs11Bridge,
-            MockHardwareService mockHardwareService
+            Pkcs11Bridge pkcs11Bridge
     ) {
         this.config = config;
         this.cardReaderManager = cardReaderManager;
         this.pkcs11Bridge = pkcs11Bridge;
-        this.mockHardwareService = mockHardwareService;
     }
 
     /**
@@ -72,25 +68,6 @@ public class CryptoService {
             validatePinNonEmpty(safePin);
             byte[] challengeBytes = RsaDigestInfoHelper.decodeChallengeNonce(nonce);
 
-            if (cardReaderManager.isMockActive()) {
-                mockHardwareService.authenticatePinOrThrow(safePin.getPin());
-                try {
-                    X509Certificate cert = mockHardwareService.getAuthCertificate();
-                    verifyCertificateValidity(cert);
-                    String signedNonce = mockHardwareService.signDataWithAuthKey(challengeBytes);
-                    String pem = MockHardwareService.convertToPem(cert);
-                    Map<String, String> meta = extractCertificateMetadata(cert);
-                    enrichWithHardwareMetadata(meta);
-                    cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
-                    return new AuthChallengeResult(nonce.trim(), signedNonce, pem, meta);
-                } catch (CryptoOperationException coe) {
-                    throw coe;
-                } catch (Exception e) {
-                    throw new CryptoOperationException(ErrorCode.PKCS11_ERROR, "Error en firma Sandbox: " + e.getMessage(), null, e);
-                }
-            }
-
-            // Physical PKCS#11 Hardware Execution
             File dllFile = resolvePkcs11DriverOrThrow();
             int nextEstimatedOnFailure = Math.max(0, hardwarePinAttemptEstimator.get() - 1);
 
@@ -105,13 +82,15 @@ public class CryptoService {
                 verifyCertificateValidity(cert);
 
                 PrivateKey privateKey = (PrivateKey) ks.getKey(authAlias, null);
-                Signature sig = Signature.getInstance("SHA256withRSA", session.provider());
+                Signature sig = session.provider() != null
+                        ? Signature.getInstance("SHA256withRSA", session.provider())
+                        : Signature.getInstance("SHA256withRSA");
                 sig.initSign(privateKey);
                 sig.update(challengeBytes);
                 byte[] signatureBytes = sig.sign();
 
                 String signedB64 = Base64.getEncoder().encodeToString(signatureBytes);
-                String pem = MockHardwareService.convertToPem(cert);
+                String pem = encodeCertificateToPem(cert);
                 Map<String, String> meta = extractCertificateMetadata(cert);
                 enrichWithHardwareMetadata(meta);
                 cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
@@ -153,7 +132,6 @@ public class CryptoService {
             byte[] rawSha256Bytes = RsaDigestInfoHelper.decodeSha256Hex(documentHashHex);
             String cleanHashHex = documentHashHex.trim();
 
-            // Prepare signing input and JCA algorithm according to configured PAdES digest mode
             final byte[] payloadToSign;
             final String jcaAlgorithm;
             switch (config.documentDigestSignMode()) {
@@ -172,34 +150,6 @@ public class CryptoService {
                 default -> throw new IllegalStateException("Unhandled digest mode: " + config.documentDigestSignMode());
             }
 
-            if (cardReaderManager.isMockActive()) {
-                mockHardwareService.authenticatePinOrThrow(safePin.getPin());
-                try {
-                    X509Certificate cert = mockHardwareService.getSignCertificate();
-                    verifyCertificateValidity(cert);
-
-                    String signatureValue = mockHardwareService.signDataWithSignKey(payloadToSign, jcaAlgorithm);
-                    String pem = MockHardwareService.convertToPem(cert);
-                    Map<String, String> meta = extractCertificateMetadata(cert);
-                    cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
-
-                    return new DocumentDigestResult(
-                            slotId.trim(),
-                            meta.getOrDefault("dni", config.mockDniSimulated()),
-                            cleanHashHex,
-                            signatureValue,
-                            formatCanonicalReniecDn(cert),
-                            meta.get("certificateSerialNumber"),
-                            pem
-                    );
-                } catch (CryptoOperationException coe) {
-                    throw coe;
-                } catch (Exception e) {
-                    throw new CryptoOperationException(ErrorCode.PKCS11_ERROR, "Error en firma PAdES Sandbox: " + e.getMessage(), null, e);
-                }
-            }
-
-            // Physical PKCS#11 Hardware Execution
             File dllFile = resolvePkcs11DriverOrThrow();
             int nextEstimatedOnFailure = Math.max(0, hardwarePinAttemptEstimator.get() - 1);
 
@@ -216,7 +166,9 @@ public class CryptoService {
                 PrivateKey privateKey = (PrivateKey) ks.getKey(signAlias, null);
                 byte[] signatureBytes;
                 try {
-                    Signature sig = Signature.getInstance(jcaAlgorithm, session.provider());
+                    Signature sig = session.provider() != null
+                            ? Signature.getInstance(jcaAlgorithm, session.provider())
+                            : Signature.getInstance(jcaAlgorithm);
                     sig.initSign(privateKey);
                     sig.update(payloadToSign);
                     signatureBytes = sig.sign();
@@ -226,14 +178,16 @@ public class CryptoService {
                     }
                     logger.warn("PKCS#11 NONEwithRSA failed on alias={}, falling back to SHA256withRSA over hash bytes: {}",
                             signAlias, primaryEx.getMessage());
-                    Signature fallbackSig = Signature.getInstance("SHA256withRSA", session.provider());
+                    Signature fallbackSig = session.provider() != null
+                            ? Signature.getInstance("SHA256withRSA", session.provider())
+                            : Signature.getInstance("SHA256withRSA");
                     fallbackSig.initSign(privateKey);
                     fallbackSig.update(rawSha256Bytes);
                     signatureBytes = fallbackSig.sign();
                 }
 
                 String signatureValue = Base64.getEncoder().encodeToString(signatureBytes);
-                String pem = MockHardwareService.convertToPem(cert);
+                String pem = encodeCertificateToPem(cert);
                 Map<String, String> meta = extractCertificateMetadata(cert);
                 cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
 
@@ -263,6 +217,15 @@ public class CryptoService {
             if (rawPin != null) {
                 Arrays.fill(rawPin, '\0');
             }
+        }
+    }
+
+    public static String encodeCertificateToPem(X509Certificate certificate) {
+        try {
+            String b64 = Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(certificate.getEncoded());
+            return "-----BEGIN CERTIFICATE-----\n" + b64 + "\n-----END CERTIFICATE-----";
+        } catch (Exception e) {
+            throw new IllegalStateException("Error encoding X.509 certificate to PEM", e);
         }
     }
 
@@ -322,7 +285,6 @@ public class CryptoService {
             }
 
             boolean[] keyUsage = cert.getKeyUsage();
-            // X.509 KeyUsage bits: [0] = digitalSignature, [1] = nonRepudiation (contentCommitment)
             boolean hasDigitalSignature = keyUsage != null && keyUsage.length > 0 && keyUsage[0];
             boolean hasNonRepudiation = keyUsage != null && keyUsage.length > 1 && keyUsage[1];
             String subjectDn = cert.getSubjectX500Principal() != null ? cert.getSubjectX500Principal().getName() : "";
@@ -409,7 +371,6 @@ public class CryptoService {
             fullName = firstRdnString(subject, BCStyle.CN);
             String rawSn = firstRdnString(subject, BCStyle.SERIALNUMBER);
             if (!rawSn.isEmpty()) {
-                // RENIEC serial numbers follow patterns such as "DNI71234567" or "PNOPE-71234567"
                 String digitsOnly = rawSn.replaceAll("[^0-9]", "");
                 dni = digitsOnly.length() >= 8 ? digitsOnly.substring(0, 8) : digitsOnly;
             }

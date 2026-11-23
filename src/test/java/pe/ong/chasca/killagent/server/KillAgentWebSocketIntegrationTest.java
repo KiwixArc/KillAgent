@@ -10,9 +10,8 @@ import org.junit.jupiter.api.Test;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.crypto.CryptoService;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
-import pe.ong.chasca.killagent.hardware.HardwareProbe;
-import pe.ong.chasca.killagent.hardware.mock.MockHardwareService;
-import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
+import pe.ong.chasca.killagent.testsupport.MutableTestHardwareProbe;
+import pe.ong.chasca.killagent.testsupport.TestSoftTokenPkcs11Bridge;
 import pe.ong.chasca.killagent.ui.CardWaitProvider;
 import pe.ong.chasca.killagent.ui.PinPromptProvider;
 
@@ -36,6 +35,7 @@ class KillAgentWebSocketIntegrationTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private int testPort;
+    private MutableTestHardwareProbe hardwareProbe;
     private CardReaderManager readerManager;
     private KillAgentWebSocketServer server;
     private AtomicReference<PinPromptProvider.PinPromptResult> scriptedPinResponse;
@@ -72,29 +72,18 @@ class KillAgentWebSocketIntegrationTest {
                 false,
                 "./keystore/loopback.p12",
                 "changeit",
-                Set.of(ALLOWED_ORIGIN, "https://chasca.ong.pe"),
+                Set.of(ALLOWED_ORIGIN, "https://chaska.ong.pe"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
-                true,
-                "71234567",
-                "JUAN PEREZ GARCIA",
                 "auto",
                 false
         );
 
-        readerManager = new CardReaderManager(config, new HardwareProbe() {
-            @Override
-            public Snapshot probe() {
-                return Snapshot.empty();
-            }
-
-            @Override
-            public void waitForChange(int timeoutMs) {
-            }
-        });
-        Pkcs11Bridge pkcs11Bridge = new Pkcs11Bridge(config);
-        MockHardwareService mockService = new MockHardwareService(config);
-        CryptoService cryptoService = new CryptoService(config, readerManager, pkcs11Bridge, mockService);
+        hardwareProbe = new MutableTestHardwareProbe(true);
+        readerManager = new CardReaderManager(config, hardwareProbe);
+        readerManager.probeOnce(false);
+        TestSoftTokenPkcs11Bridge pkcs11Bridge = new TestSoftTokenPkcs11Bridge(config, "71234567", "JUAN PEREZ GARCIA");
+        CryptoService cryptoService = new CryptoService(config, readerManager, pkcs11Bridge);
 
         scriptedPinResponse = new AtomicReference<>(
                 new PinPromptProvider.PinPromptResult(new char[]{'1', '2', '3', '4', '5', '6'}, PinPromptProvider.AbortReason.NONE)
@@ -191,7 +180,8 @@ class KillAgentWebSocketIntegrationTest {
                     try {
                         WaitOutcome outcome = pending.get(5, TimeUnit.SECONDS);
                         if (outcome == WaitOutcome.CARD_READY && simulateCardInsertOnWaitReady) {
-                            rm.simulateMockCardInsertion();
+                            hardwareProbe.insertCard();
+                            rm.probeOnce(true);
                         }
                         return outcome;
                     } catch (Exception e) {
@@ -200,7 +190,8 @@ class KillAgentWebSocketIntegrationTest {
                 }
                 WaitOutcome outcome = scriptedWaitOutcome.get();
                 if (outcome == WaitOutcome.CARD_READY && simulateCardInsertOnWaitReady) {
-                    rm.simulateMockCardInsertion();
+                    hardwareProbe.insertCard();
+                    rm.probeOnce(true);
                 }
                 return outcome;
             }
@@ -259,7 +250,7 @@ class KillAgentWebSocketIntegrationTest {
         BlockingQueue<String> messages = new LinkedBlockingQueue<>();
 
         WebSocketClient attackerClient = createTestClient(
-                "https://chasca.ong.pe.attacker.com",
+                "https://chaska.ong.pe.attacker.com",
                 messages,
                 closedLatch
         );
@@ -303,7 +294,7 @@ class KillAgentWebSocketIntegrationTest {
             assertEquals("SUCCESS", authRes.get("status").asText());
             assertEquals("71234567", authRes.get("payload").get("metadata").get("dni").asText());
             assertEquals("Verificación de Seguridad DNIe", lastRequestedTitle.get());
-            assertEquals("Autenticación Institucional Ch'asca (Verificación DNIe)", lastRequestedDetails.get());
+            assertEquals("Autenticación Institucional Ch'aska (Verificación DNIe)", lastRequestedDetails.get());
 
             // 2b. Test SIGN_AUTH_CHALLENGE with custom operationTitle & HTML-sanitized operationDescription
             client.send("""
@@ -367,19 +358,21 @@ class KillAgentWebSocketIntegrationTest {
             assertEquals("USER_CANCELLED", cancelNode.get("errorCode").asText());
 
             // 5. Test Real-Time Hardware Kill-Switch Push Notification (CARD_REMOVED & CARD_INSERTED)
-            readerManager.simulateMockCardRemoval();
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
             String removedRaw = inbox.poll(3, TimeUnit.SECONDS);
             assertNotNull(removedRaw);
             JsonNode removedNode = mapper.readTree(removedRaw);
             assertEquals("CARD_REMOVED", removedNode.get("type").asText());
             assertNotNull(removedNode.get("timestamp").asText());
 
-            readerManager.simulateMockCardInsertion();
+            hardwareProbe.insertCard();
+            readerManager.probeOnce(true);
             String insertedRaw = inbox.poll(3, TimeUnit.SECONDS);
             assertNotNull(insertedRaw);
             JsonNode insertedNode = mapper.readTree(insertedRaw);
             assertEquals("CARD_INSERTED", insertedNode.get("type").asText());
-            assertTrue(insertedNode.get("readerName").asText().contains("Sandbox"));
+            assertTrue(insertedNode.get("readerName").asText().contains("Identiv"));
         } finally {
             client.closeBlocking();
         }
@@ -570,7 +563,7 @@ class KillAgentWebSocketIntegrationTest {
     }
 
     @Test
-    void testReaderStatusChangedBroadcastAndMockModeDisableNotification() throws Exception {
+    void testReaderStatusChangedBroadcastAndPhysicalDisconnectNotification() throws Exception {
         CountDownLatch closedLatch = new CountDownLatch(1);
         BlockingQueue<String> inbox = new LinkedBlockingQueue<>();
 
@@ -598,17 +591,18 @@ class KillAgentWebSocketIntegrationTest {
             assertFalse(disconnectedNode.get("readerPresent").asBoolean());
             assertTrue(disconnectedNode.get("readerName").isNull());
 
-            // 2. Disabling mock mode immediately emits CARD_REMOVED + READER_STATUS_CHANGED(false, null)
-            readerManager.setMockMode(false);
-            String mockRemovedRaw = inbox.poll(3, TimeUnit.SECONDS);
-            String mockReaderOffRaw = inbox.poll(3, TimeUnit.SECONDS);
-            assertNotNull(mockRemovedRaw);
-            assertNotNull(mockReaderOffRaw);
-            assertEquals("CARD_REMOVED", mapper.readTree(mockRemovedRaw).get("type").asText());
-            JsonNode mockReaderOffNode = mapper.readTree(mockReaderOffRaw);
-            assertEquals("READER_STATUS_CHANGED", mockReaderOffNode.get("type").asText());
-            assertFalse(mockReaderOffNode.get("readerPresent").asBoolean());
-            assertTrue(mockReaderOffNode.get("readerName").isNull());
+            // 2. Disconnecting physical reader with card immediately emits CARD_REMOVED + READER_STATUS_CHANGED(false, null)
+            hardwareProbe.disconnectReader();
+            readerManager.probeOnce(true);
+            String cardRemovedRaw = inbox.poll(3, TimeUnit.SECONDS);
+            String readerOffRaw = inbox.poll(3, TimeUnit.SECONDS);
+            assertNotNull(cardRemovedRaw);
+            assertNotNull(readerOffRaw);
+            assertEquals("CARD_REMOVED", mapper.readTree(cardRemovedRaw).get("type").asText());
+            JsonNode readerOffNode = mapper.readTree(readerOffRaw);
+            assertEquals("READER_STATUS_CHANGED", readerOffNode.get("type").asText());
+            assertFalse(readerOffNode.get("readerPresent").asBoolean());
+            assertTrue(readerOffNode.get("readerName").isNull());
         } finally {
             client.closeBlocking();
         }
@@ -626,7 +620,8 @@ class KillAgentWebSocketIntegrationTest {
             assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CONNECTION_ESTABLISHED
 
             // Ensure cardPresent == false before sending SIGN_AUTH_CHALLENGE with waitForCard: true
-            readerManager.simulateMockCardRemoval();
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
             String removedRaw = inbox.poll(3, TimeUnit.SECONDS);
             assertNotNull(removedRaw);
             assertEquals("CARD_REMOVED", mapper.readTree(removedRaw).get("type").asText());
@@ -678,7 +673,8 @@ class KillAgentWebSocketIntegrationTest {
         try {
             assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CONNECTION_ESTABLISHED
 
-            readerManager.simulateMockCardRemoval();
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
             assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CARD_REMOVED
 
             scriptedWaitOutcome.set(CardWaitProvider.WaitOutcome.TIMEOUT);
@@ -717,7 +713,8 @@ class KillAgentWebSocketIntegrationTest {
         try {
             assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CONNECTION_ESTABLISHED
 
-            readerManager.simulateMockCardRemoval();
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
             assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CARD_REMOVED
 
             // 1. Explicit waitForCard: false
@@ -776,7 +773,8 @@ class KillAgentWebSocketIntegrationTest {
             assertNotNull(inbox1.poll(3, TimeUnit.SECONDS));
             assertNotNull(inbox2.poll(3, TimeUnit.SECONDS));
 
-            readerManager.simulateMockCardRemoval();
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
             assertNotNull(inbox1.poll(3, TimeUnit.SECONDS));
             assertNotNull(inbox2.poll(3, TimeUnit.SECONDS));
 

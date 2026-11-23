@@ -12,12 +12,11 @@ public record HardwareStatus(
         @JsonProperty("cardType") CardType cardType,
         @JsonProperty("isMock") boolean isMock
 ) {
+    public HardwareStatus(boolean readerPresent, boolean cardPresent, String readerName, CardType cardType) {
+        this(readerPresent, cardPresent, readerName, cardType, false);
+    }
+
     public static HardwareStatus noHardware() {
         return new HardwareStatus(false, false, null, CardType.NONE, false);
     }
-
-    public static HardwareStatus mock(String mockReader, CardType type, boolean inserted) {
-        return new HardwareStatus(true, inserted, mockReader, type, true);
-    }
 }
-
