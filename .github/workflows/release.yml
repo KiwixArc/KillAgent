@@ -104,17 +104,24 @@ jobs:
         shell: pwsh
         env:
           UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ vars.UPDATE_SIGNING_PUBLIC_KEY }}
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          RELEASE_NOTES: ${{ steps.meta.outputs.notes }}
         run: |
+          if ($env:UPDATE_SIGNING_PUBLIC_KEY) {
+            $pub = $env:UPDATE_SIGNING_PUBLIC_KEY.Trim()
+            $propsPath = "src/main/resources/config.properties"
+            $props = Get-Content $propsPath -Raw
+            $props = [regex]::Replace($props, '(?m)^UPDATE_SIGNING_PUBLIC_KEY=.*$', "UPDATE_SIGNING_PUBLIC_KEY=$pub")
+            [IO.File]::WriteAllText((Resolve-Path $propsPath).Path, $props, [Text.UTF8Encoding]::new($false))
+          }
           $pkgParams = @{
             PackageType             = "all"
             AppVersion              = "${{ steps.meta.outputs.version }}"
             Channel                 = "${{ steps.meta.outputs.channel }}"
             MinimumSupportedVersion = "${{ steps.meta.outputs.min_floor }}"
-            ReleaseNotes            = @"
-          ${{ steps.meta.outputs.notes }}
-          "@
+            ReleaseNotes            = $env:RELEASE_NOTES
             SkipTests               = $true
           }
           if ("${{ steps.meta.outputs.mandatory }}" -eq "true") {
@@ -152,6 +159,7 @@ jobs:
           name: KILLAgent v${{ steps.meta.outputs.version }}
           prerelease: ${{ steps.meta.outputs.channel == 'beta' }}
           generate_release_notes: true
+          overwrite_files: true
           files: |
             dist/*.msi
             dist/*-portable.zip
