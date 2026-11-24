@@ -55,7 +55,7 @@ class SecurityInvariantsTest {
                 false,
                 "./keystore/loopback.p12",
                 "changeit",
-                Set.of("https://*.pages.dev", "https://*.workers.dev", "https://*.chaska.ong.pe", "http://localhost:*"),
+                Set.of("https://chaska.lat", "https://*.chaska.lat", "https://*.pages.dev", "https://*.workers.dev", "https://*.chaska.ong.pe", "http://localhost:*"),
                 "bit4ipki.dll",
                 "idplug-pkcs11.dll",
                 "auto",
@@ -64,6 +64,8 @@ class SecurityInvariantsTest {
 
         OriginValidator validator = new OriginValidator(config);
 
+        assertTrue(validator.isAllowed("https://chaska.lat"));
+        assertTrue(validator.isAllowed("https://app.chaska.lat"));
         assertTrue(validator.isAllowed("https://chaska-webapp.pages.dev"));
         assertTrue(validator.isAllowed("https://chaska-webapp.example.workers.dev"));
         assertTrue(validator.isAllowed("https://pr-42.chaska-webapp.pages.dev:443"));
@@ -72,6 +74,8 @@ class SecurityInvariantsTest {
         assertTrue(validator.isAllowed("http://localhost:4173"));
 
         // Must reject insecure schemes, root suffixes without subdomain, and spoofed suffixes
+        assertFalse(validator.isAllowed("http://chaska.lat"));
+        assertFalse(validator.isAllowed("https://chaska.lat.evil.com"));
         assertFalse(validator.isAllowed("http://chaska-webapp.pages.dev"));
         assertFalse(validator.isAllowed("https://pages.dev"));
         assertFalse(validator.isAllowed("https://chaska-webapp.pages.dev.evil.com"));

@@ -21,7 +21,7 @@ public final class ConfigurationLoader {
     private static final Logger logger = LoggerFactory.getLogger(ConfigurationLoader.class);
     private static final String DEFAULT_PROPERTIES_PATH = "/config.properties";
     private static final String DEFAULT_ORIGINS =
-            "https://chaska.ong.pe,https://*.chaska.ong.pe,https://*.chaska.ngo,https://app.chaska.internal,"
+            "https://chaska.lat,https://*.chaska.lat,https://chaska.ong.pe,https://*.chaska.ong.pe,https://*.chaska.ngo,https://app.chaska.internal,"
                     + "https://*.workers.dev,https://*.pages.dev,https://*.vercel.app,https://*.netlify.app,"
                     + "https://*.up.railway.app,https://*.onrender.com,http://localhost:5173,http://127.0.0.1:5173";
 
