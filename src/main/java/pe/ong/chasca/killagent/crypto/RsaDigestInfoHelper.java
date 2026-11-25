@@ -6,13 +6,21 @@ import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 
 /**
- * Cryptographic helper for RFC 8017 (PKCS#1 v2.2) ASN.1 DER DigestInfo encoding
- * and strict hexadecimal validation for SHA-256 digests and authentication nonces.
+ * Cryptographic helper for RFC 8017 (PKCS#1 v2.2) ASN.1 DER {@code DigestInfo} encoding
+ * and strict hexadecimal validation for SHA-256 document digests and authentication nonces.
+ * <p>
+ * <strong>PAdES Signing Design Invariant:</strong> In the Ch'aska Zero Trust architecture, the
+ * backend computes the SHA-256 hash of the PDF signed byte range / CMS signed attributes and
+ * transmits only the 64-char hex digest over the local WebSocket channel. Wrapping the 32-byte
+ * digest in the 19-byte ASN.1 DER SHA-256 {@code DigestInfo} prefix and signing via
+ * {@code NONEwithRSA} ({@code CKM_RSA_PKCS}) produces a PKCS#1 v1.5 signature mathematically
+ * identical to {@code SHA256withRSA} over the full original bytes—without double-hashing.
  */
 public final class RsaDigestInfoHelper {
 
     /**
      * ASN.1 DER prefix for SHA-256 DigestInfo (OID 2.16.840.1.101.3.4.2.1 with NULL parameters + 32-byte OCTET STRING):
+     * <pre>
      * SEQUENCE (49 bytes) {
      *   SEQUENCE (13 bytes) {
      *     OBJECT IDENTIFIER 2.16.840.1.101.3.4.2.1 (SHA-256)
@@ -20,6 +28,7 @@ public final class RsaDigestInfoHelper {
      *   }
      *   OCTET STRING (32 bytes)
      * }
+     * </pre>
      */
     private static final byte[] SHA256_DIGEST_INFO_PREFIX = new byte[]{
             0x30, 0x31, 0x30, 0x0d, 0x06, 0x09,
@@ -34,6 +43,11 @@ public final class RsaDigestInfoHelper {
 
     /**
      * Validates and parses a 64-character hexadecimal SHA-256 digest into 32 raw bytes.
+     *
+     * @param sha256Hex 64-character hexadecimal SHA-256 string (trimmed before parsing)
+     * @return 32-byte raw SHA-256 digest
+     * @throws CryptoOperationException with {@link ErrorCode#MALFORMED_REQUEST} if {@code null},
+     *                                  wrong length, or containing non-hex characters
      */
     public static byte[] decodeSha256Hex(String sha256Hex) throws CryptoOperationException {
         if (sha256Hex == null || sha256Hex.trim().length() != SHA256_HEX_LENGTH) {
@@ -59,8 +73,12 @@ public final class RsaDigestInfoHelper {
     }
 
     /**
-     * Encapsulates a raw 32-byte SHA-256 digest into a 51-byte DER DigestInfo structure
-     * suitable for signing with NONEwithRSA (PKCS#11 CKM_RSA_PKCS).
+     * Encapsulates a raw 32-byte SHA-256 digest into a 51-byte ASN.1 DER {@code DigestInfo}
+     * structure suitable for raw PKCS#1 v1.5 RSA padding via {@code NONEwithRSA} ({@code CKM_RSA_PKCS}).
+     *
+     * @param sha256Digest raw 32-byte SHA-256 hash
+     * @return 51-byte DER-encoded {@code DigestInfo} ({@code 19-byte prefix || 32-byte digest})
+     * @throws IllegalArgumentException if {@code sha256Digest} is {@code null} or not 32 bytes
      */
     public static byte[] buildSha256DigestInfo(byte[] sha256Digest) {
         if (sha256Digest == null || sha256Digest.length != SHA256_BYTE_LENGTH) {
@@ -73,8 +91,15 @@ public final class RsaDigestInfoHelper {
     }
 
     /**
-     * Resolves an incoming authentication challenge nonce into bytes to be signed with SHA256withRSA.
-     * If the nonce is valid even-length hex (>= 32 chars), decodes hex bytes; otherwise signs UTF-8 bytes safely.
+     * Resolves an incoming authentication challenge nonce into bytes to be signed with {@code SHA256withRSA}.
+     * <p>
+     * If the trimmed nonce is an even-length hexadecimal string of at least 32 characters
+     * (16+ bytes of entropy, matching Ch'aska backend challenges), decodes the raw hex bytes;
+     * otherwise falls back to UTF-8 encoding so opaque ASCII/UUID tokens sign deterministically.
+     *
+     * @param nonce non-blank challenge string from {@code SIGN_AUTH_CHALLENGE}
+     * @return byte array to feed into {@code Signature.update(...)}
+     * @throws CryptoOperationException with {@link ErrorCode#MALFORMED_REQUEST} if {@code nonce} is null or blank
      */
     public static byte[] decodeChallengeNonce(String nonce) throws CryptoOperationException {
         if (nonce == null || nonce.isBlank()) {

@@ -26,12 +26,25 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
- * Dynamic SunPKCS11 hardware bridge for RENIEC / IDEMIA DNIe cryptographic
- * middleware.
- * Manages lifecycle-scoped PKCS#11 sessions with deterministic C_Logout on
- * close
- * and safe multi-reader slot discovery that never double-submits an invalid
- * PIN.
+ * Dynamic SunPKCS11 hardware bridge for RENIEC / IDEMIA DNIe cryptographic middleware.
+ * <p>
+ * <strong>PKCS#11 Lifecycle &amp; PIN Safety Invariants:</strong>
+ * <ul>
+ *     <li><strong>Single-Operation Session Scoping:</strong> Each {@link Pkcs11Session} registers an
+ *     ephemeral, uniquely named {@code SunPKCS11} provider instance configured with an inline
+ *     {@code slotListIndex} configuration and deterministically executes {@link AuthProvider#logout()}
+ *     ({@code C_Logout}) plus {@link Security#removeProvider(String)} on {@link Pkcs11Session#close()}.</li>
+ *     <li><strong>Zero Double-Submit PIN Protection:</strong> During {@code openSession(...)}, if any
+ *     slot throws {@link ErrorCode#PIN_INCORRECT} or {@link ErrorCode#PIN_LOCKED}, slot scanning halts
+ *     immediately so the DNIe chip's 3-attempt hardware retry counter is never decremented more than
+ *     once per user submission.</li>
+ *     <li><strong>Unauthenticated Pre-Scan for Signing:</strong> For {@link CertificatePurpose#SIGNATURE},
+ *     {@link #resolveSlotScanOrder(File, CertificatePurpose)} probes public X.509 objects with
+ *     {@code KeyStore.load(null, null)} (no {@code C_Login}) to locate and prioritize Non-Repudiation
+ *     ({@code FIR}) slots ahead of Authentication ({@code AUT}) slots.</li>
+ *     <li><strong>Kill-Switch Cleanup:</strong> {@link #cleanup()} immediately logs out and unregisters
+ *     any active {@code SunPKCS11} provider upon physical card removal or daemon shutdown.</li>
+ * </ul>
  */
 public class Pkcs11Bridge {
 
@@ -42,33 +55,59 @@ public class Pkcs11Bridge {
     private final AgentConfig config;
     private volatile Provider activeProvider;
 
+    /**
+     * Creates a PKCS#11 bridge configured with driver library paths from {@link AgentConfig}.
+     *
+     * @param config active runtime configuration
+     */
     public Pkcs11Bridge(AgentConfig config) {
         this.config = config;
     }
 
     /**
      * Scoped PKCS#11 cryptographic session that automatically logs out of the
-     * hardware token and unregisters the ephemeral provider upon completion.
+     * hardware token ({@code C_Logout}) and unregisters the ephemeral {@code SunPKCS11} provider
+     * upon {@link #close()}.
      */
     public static final class Pkcs11Session implements AutoCloseable {
         private final Provider provider;
         private final KeyStore keyStore;
         private final Runnable closeAction;
 
+        /**
+         * Wraps an authenticated {@code SunPKCS11} provider and loaded {@link KeyStore} with its cleanup callback.
+         *
+         * @param provider    configured {@code SunPKCS11} security provider (may be {@code null} in mock tests)
+         * @param keyStore    authenticated PKCS#11 {@link KeyStore}
+         * @param closeAction deterministic logout/unload callback executed on {@link #close()}
+         */
         public Pkcs11Session(Provider provider, KeyStore keyStore, Runnable closeAction) {
             this.provider = provider;
             this.keyStore = keyStore;
             this.closeAction = closeAction;
         }
 
+        /**
+         * Returns the active {@code SunPKCS11} {@link Provider} bound to this session.
+         *
+         * @return configured provider instance, or {@code null} in synthetic test doubles
+         */
         public Provider provider() {
             return provider;
         }
 
+        /**
+         * Returns the authenticated {@link KeyStore} exposing token certificates and private key handles.
+         *
+         * @return loaded PKCS#11 {@link KeyStore}
+         */
         public KeyStore keyStore() {
             return keyStore;
         }
 
+        /**
+         * Executes deterministic {@code C_Logout} and removes the ephemeral {@code SunPKCS11} provider.
+         */
         @Override
         public void close() {
             if (closeAction != null) {

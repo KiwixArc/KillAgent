@@ -16,14 +16,22 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Native Windows WinSCard ({@code Winscard.dll}) hardware monitor using JNA.
+ * Native Windows WinSCard ({@code Winscard.dll}) hardware monitor using JNA ({@link WinSCardApi}).
  * <p>
- * Solves two root-cause bugs in OpenJDK {@code javax.smartcardio}:
+ * <strong>JNA &amp; PC/SC Design Invariants:</strong>
  * <ul>
- *     <li>Releasing and re-establishing {@code SCARDCONTEXT} immediately whenever Windows stops or
- *     restarts {@code SCardSvr} on USB reader removal/re-insertion.</li>
- *     <li>Reading card presence and ATR directly from {@code SCARD_READERSTATE} without opening a
- *     competing {@code SCardConnect} session that could interfere with {@code idplug-pkcs11.dll}.</li>
+ *     <li><strong>SCardSvr Recovery:</strong> Bypasses OpenJDK {@code sun.security.smartcardio}'s static
+ *     cached {@code contextId} by explicitly releasing ({@code SCardReleaseContext}) and re-establishing
+ *     ({@code SCardEstablishContext}) the {@code SCARDCONTEXT} whenever Windows stops or restarts
+ *     {@code SCardSvr} on USB reader removal/re-insertion (e.g., {@code SCARD_E_NO_SERVICE},
+ *     {@code SCARD_E_SERVICE_STOPPED}, {@code SCARD_E_INVALID_HANDLE}).</li>
+ *     <li><strong>Zero Competing Card Connections:</strong> Reads {@code SCARD_STATE_PRESENT} and ATR bytes
+ *     ({@code cbAtr}/{@code rgbAtr}) directly from {@code SCardGetStatusChange} / {@code SCARD_READERSTATEW}
+ *     without opening a competing {@code SCardConnect} session that could lock out {@code idplug-pkcs11.dll}.</li>
+ *     <li><strong>PnP Hot-Plug Notification:</strong> Monitors the virtual {@code \\?PnP?\Notification}
+ *     pseudo-reader alongside known terminals for instant USB reader arrival/removal detection.</li>
+ *     <li><strong>UTF-16 Multi-String Parsing:</strong> Uses {@code W32APIOptions.UNICODE_OPTIONS} and
+ *     parses double-null-terminated {@code REG_MULTI_SZ} reader lists via {@link #parseMultiStringUtf16(char[])}.</li>
  * </ul>
  */
 public final class WinSCardReaderProbe implements HardwareProbe {
@@ -49,6 +57,12 @@ public final class WinSCardReaderProbe implements HardwareProbe {
         this.api = Objects.requireNonNull(api, "WinSCardApi must not be null");
     }
 
+    /**
+     * Queries current PC/SC readers and card states via {@code SCardListReaders} + {@code SCardGetStatusChange}
+     * with zero timeout, automatically recovering from invalidated {@code SCARDCONTEXT} handles.
+     *
+     * @return immutable {@link Snapshot} of active readers, card presence flags, and ATR bytes
+     */
     @Override
     public Snapshot probe() {
         synchronized (operationLock) {
@@ -133,6 +147,13 @@ public final class WinSCardReaderProbe implements HardwareProbe {
         return new Snapshot(snapshots);
     }
 
+    /**
+     * Blocks up to {@code timeoutMs} (clamped to {@code [50, 350]} ms) in native {@code SCardGetStatusChange}
+     * waiting for either PnP reader arrival/removal or smart-card insertion/removal transitions.
+     *
+     * @param timeoutMs requested wait window in milliseconds
+     * @throws InterruptedException if the monitor thread is interrupted during backoff sleep
+     */
     @Override
     public void waitForChange(int timeoutMs) throws InterruptedException {
         if (closed) {

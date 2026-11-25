@@ -45,8 +45,27 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Hardened loopback-only (127.0.0.1) WebSocket / WSS server mediating Zero Trust cryptographic
+ * Hardened loopback-only ({@code 127.0.0.1}) WebSocket / WSS server mediating Zero Trust cryptographic
  * operations between the Ch'aska React SPA and local PKCS#11 DNIe smart cards.
+ * <p>
+ * <strong>Zero Trust Protocol &amp; Concurrency Invariants:</strong>
+ * <ul>
+ *     <li><strong>Loopback Isolation:</strong> {@link #validateAndCreateLoopbackAddress(AgentConfig)} enforces
+ *     {@code InetAddress.isLoopbackAddress() && !isAnyLocalAddress()}, preventing exposure on {@code 0.0.0.0} or LAN NICs.</li>
+ *     <li><strong>Two-Layer Anti-CSWSH Defense:</strong> {@link #onWebsocketHandshakeReceivedAsServer} validates
+ *     the HTTP {@code Origin} header via {@link OriginValidator} prior to WebSocket upgrade (rejecting with close
+ *     code {@code 1008 / CloseFrame.REFUSE}), and {@link #onOpen} performs defense-in-depth re-validation.</li>
+ *     <li><strong>Bounded Frame &amp; HTML Injection Guards:</strong> Rejects frames exceeding {@code 32,768} chars
+ *     with {@link ErrorCode#MALFORMED_REQUEST}, and sanitizes/HTML-escapes all client-supplied modal strings before
+ *     rendering in Swing HTML labels.</li>
+ *     <li><strong>Single Active Hardware Operation Lock:</strong> A non-blocking {@link Semaphore}
+ *     ({@code hardwareOperationLock}) serializes PIN/hardware workflows across the workstation; concurrent requests
+ *     receive {@link ErrorCode#OPERATION_IN_PROGRESS}.</li>
+ *     <li><strong>Single Crypto Worker &amp; Disconnect/Kill-Switch Abort:</strong> Blocking UI/PKCS#11 tasks run on a
+ *     dedicated single-thread daemon executor ({@code killagent-crypto-worker}) rather than Selector I/O threads.
+ *     Client socket closure ({@link #onClose}), {@code CANCEL_ACTIVE_OPERATION}, or physical card removal
+ *     ({@link #onCardRemoved}) immediately aborts active modals and releases the semaphore.</li>
+ * </ul>
  */
 public class KillAgentWebSocketServer extends WebSocketServer implements HardwareListener {
 
@@ -145,8 +164,15 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
     }
 
     /**
-     * Layer 1 Anti-CSWSH Defense: Rejects unauthorized Origin headers during HTTP Upgrade handshake
-     * before a WebSocket session is even established.
+     * Layer 1 Anti-CSWSH Defense: Rejects unauthorized {@code Origin} headers during HTTP Upgrade handshake
+     * before a WebSocket session is established, returning WebSocket close/refusal code {@code 1008}
+     * ({@link CloseFrame#REFUSE}).
+     *
+     * @param conn    pending client WebSocket connection
+     * @param draft   negotiated WebSocket protocol draft
+     * @param request incoming HTTP upgrade handshake headers
+     * @return server handshake builder when origin validation succeeds
+     * @throws InvalidDataException with {@link CloseFrame#REFUSE} ({@code 1008}) if {@code Origin} is unauthorized
      */
     @Override
     public ServerHandshakeBuilder onWebsocketHandshakeReceivedAsServer(
@@ -163,6 +189,11 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         return builder;
     }
 
+    /**
+     * Layer 2 Defense-in-depth origin check upon socket open, assigns an ephemeral {@code wsConnectionId},
+     * updates System Tray connection count, and immediately emits {@link ConnectionEstablishedMessage}
+     * containing the agent version and initial {@link HardwareStatus}.
+     */
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
         String origin = handshake.getFieldValue("Origin");
@@ -183,6 +214,10 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         logger.info("WebSocket session established: id={}, origin={}", wsConnectionId, origin);
     }
 
+    /**
+     * Cleans up session state on disconnect and immediately aborts any active {@link CardWaitProvider}
+     * or {@link PinPromptProvider} modal owned by the closing connection so the hardware semaphore is released.
+     */
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         String id = connectionIds.remove(conn);
@@ -200,6 +235,11 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         logger.info("WebSocket session closed: id={}, code={}, remote={}", id, code, remote);
     }
 
+    /**
+     * Enforces {@code MAX_PAYLOAD_CHARS} ({@code 32,768}), parses incoming JSON commands, and dispatches
+     * {@code SIGN_AUTH_CHALLENGE}, {@code SIGN_DOCUMENT_DIGEST}, {@code CANCEL_ACTIVE_OPERATION},
+     * {@code GET_HARDWARE_STATUS}, or {@code PING}.
+     */
     @Override
     public void onMessage(WebSocket conn, String message) {
         if (message == null || message.length() > MAX_PAYLOAD_CHARS) {
@@ -640,6 +680,10 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         broadcastJson(new CardInsertedNotification(readerName));
     }
 
+    /**
+     * Broadcasts an unsolicited {@link CardRemovedNotification} ({@code CARD_REMOVED}) and immediately
+     * triggers the hardware Kill-Switch on any active PIN dialog when a DNIe card is physically removed.
+     */
     @Override
     public void onCardRemoved(String readerName) {
         logger.info("Broadcasting unsolicited CARD_REMOVED (Kill-Switch) event to all active clients.");

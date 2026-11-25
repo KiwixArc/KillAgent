@@ -14,9 +14,20 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Manages PC/SC smart card terminals (via native Windows WinSCard JNA on Windows or
- * {@code javax.smartcardio} fallback on other platforms), delivering sub-10ms event detection
- * for card insertion, card removal (Kill-Switch), and USB reader hot-plugging.
+ * Manages PC/SC smart card terminals (via native Windows WinSCard JNA {@link WinSCardReaderProbe} on Windows
+ * or {@link JavaSmartCardIoProbe} {@code javax.smartcardio} fallback on other platforms), delivering low-latency
+ * event detection for card insertion, card removal (Kill-Switch), and USB reader hot-plugging.
+ * <p>
+ * <strong>Concurrency &amp; Kill-Switch Invariants:</strong>
+ * <ul>
+ *     <li><strong>Lock Ordering:</strong> {@code probeLock} wraps blocking/I/O {@link HardwareProbe#probe()}
+ *     calls independently of {@code stateLock}, and {@link HardwareListener} callbacks are dispatched
+ *     <em>outside</em> {@code stateLock} to prevent re-entrant deadlocks (e.g., listeners calling {@link #getStatus()}).</li>
+ *     <li><strong>Reader-Switch Card Removal:</strong> If the active terminal changes while a card was present,
+ *     a synthetic card-removal Kill-Switch event is emitted for the previous terminal before activating the new one.</li>
+ *     <li><strong>ATR Classification:</strong> Maps Answer-To-Reset prefixes/ASCII markers to {@link CardType#DNIE_3_0}
+ *     (IDEMIA) or {@link CardType#DNIE_2_0} (Bit4id) so {@code Pkcs11Bridge} resolves the matching middleware DLL.</li>
+ * </ul>
  */
 public class CardReaderManager implements Runnable {
 
@@ -269,6 +280,13 @@ public class CardReaderManager implements Runnable {
         }
     }
 
+    /**
+     * Classifies a smart card's Answer-To-Reset (ATR) byte sequence into a supported {@link CardType}
+     * ({@link CardType#DNIE_3_0} vs. {@link CardType#DNIE_2_0}) and caches the uppercase hex ATR for diagnostics.
+     *
+     * @param atrBytes raw ATR bytes obtained from {@code SCARD_READERSTATE.rgbAtr} or {@code Card.getATR()}
+     * @return detected {@link CardType} (defaults to {@link CardType#DNIE_3_0} for modern RENIEC cards)
+     */
     CardType classifyAtrHex(byte[] atrBytes) {
         if (atrBytes == null || atrBytes.length == 0) {
             logger.warn("Unable to read card ATR (empty bytes); defaulting classification to DNIE_3_0.");

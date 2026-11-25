@@ -28,8 +28,24 @@ import java.util.regex.Pattern;
 
 /**
  * Core Zero Trust cryptographic mediator coordinating physical RENIEC DNIe (PKCS#11)
- * operations with strict certificate KeyUsage enforcement, RFC 8017 PAdES DigestInfo
- * framing, and deterministic PIN memory zeroization.
+ * operations with strict certificate {@code KeyUsage} separation (Peruvian Law N° 27269),
+ * RFC 8017 PAdES {@code DigestInfo} framing, and deterministic PIN memory zeroization.
+ * <p>
+ * <strong>Security &amp; Hardware Invariants:</strong>
+ * <ul>
+ *     <li><strong>Zero-String PIN Lifecycle:</strong> Raw {@code char[]} PINs are adopted into
+ *     {@link PinBuffer#adopt(char[])} and wiped in both {@code try-with-resources} and an outer
+ *     {@code finally} block, guaranteeing immediate {@code '\0'} zeroization regardless of outcome.</li>
+ *     <li><strong>Ephemeral PKCS#11 Sessions:</strong> Every operation opens a fresh {@link Pkcs11Bridge.Pkcs11Session},
+ *     executes {@code Signature.sign()} on the smart card, and immediately executes {@code C_Logout}
+ *     on session close so no authenticated token state lingers between requests.</li>
+ *     <li><strong>KeyUsage Strictness:</strong> Authentication challenges prefer the Authentication
+ *     certificate ({@code digitalSignature && !nonRepudiation}), whereas document digest signatures
+ *     prefer the Non-Repudiation / Content Commitment certificate ({@code keyUsage[1] == true}).</li>
+ *     <li><strong>Attempt Counter Protection:</strong> Tracks an internal retry estimator
+ *     ({@link #hardwarePinAttemptEstimator}) to surface {@code attemptsRemaining} on {@code PIN_INCORRECT}
+ *     without ever issuing redundant PKCS#11 logins.</li>
+ * </ul>
  */
 public class CryptoService {
 
@@ -41,6 +57,13 @@ public class CryptoService {
     private final Pkcs11Bridge pkcs11Bridge;
     private final AtomicInteger hardwarePinAttemptEstimator = new AtomicInteger(3);
 
+    /**
+     * Constructs the cryptographic mediator wired to hardware status monitoring and PKCS#11 bridge.
+     *
+     * @param config            validated immutable runtime configuration
+     * @param cardReaderManager PC/SC hardware monitor providing live card presence, ATR, and reader metadata
+     * @param pkcs11Bridge      SunPKCS11 native DLL session bridge
+     */
     public CryptoService(
             AgentConfig config,
             CardReaderManager cardReaderManager,
@@ -60,7 +83,16 @@ public class CryptoService {
 
     /**
      * Signs an authentication challenge nonce using the DNIe Authentication certificate
-     * (KeyUsage: Digital Signature without Non-Repudiation).
+     * ({@code KeyUsage: digitalSignature} without {@code nonRepudiation}) via {@code SHA256withRSA}.
+     * <p>
+     * Adopts and deterministically zeroizes {@code rawPin} in memory, validates card presence and
+     * certificate temporal validity ({@code checkValidity()}), and enriches returned metadata with
+     * citizen DNI, full name, serial number, reader name, card generation, and ATR.
+     *
+     * @param rawPin mutable {@code char[]} PIN captured locally; wiped in-place before return
+     * @param nonce  backend-issued challenge string (hexadecimal or UTF-8)
+     * @return {@link AuthChallengeResult} containing Base64 signature, PEM certificate, and metadata
+     * @throws CryptoOperationException on missing card, invalid/locked PIN, expired cert, or PKCS#11 fault
      */
     public AuthChallengeResult signAuthChallenge(char[] rawPin, String nonce) throws CryptoOperationException {
         try (PinBuffer safePin = PinBuffer.adopt(rawPin)) {
@@ -117,7 +149,18 @@ public class CryptoService {
 
     /**
      * Signs a 32-byte SHA-256 document digest for PAdES-LTV digital signatures using
-     * strictly the DNIe Non-Repudiation / Content Commitment certificate.
+     * strictly the DNIe Non-Repudiation / Content Commitment certificate ({@code keyUsage[1] == true}).
+     * <p>
+     * By default ({@link AgentConfig.DocumentDigestSignMode#PADES_DIGEST_INFO}), wraps the 32-byte
+     * hash in an RFC 8017 ASN.1 {@code DigestInfo} structure and signs with {@code NONEwithRSA};
+     * if a specific PKCS#11 driver rejects raw {@code CKM_RSA_PKCS} ({@code NONEwithRSA}), automatically
+     * falls back to {@code SHA256withRSA} over the raw hash bytes.
+     *
+     * @param rawPin          mutable {@code char[]} PIN captured locally; wiped in-place before return
+     * @param slotId          target Ch'aska signature slot identifier
+     * @param documentHashHex 64-character hexadecimal SHA-256 digest of the PDF signed content
+     * @return {@link DocumentDigestResult} containing the Base64 signature, canonical Subject DN, and PEM cert
+     * @throws CryptoOperationException on missing card, invalid/locked PIN, expired cert, or PKCS#11 fault
      */
     public DocumentDigestResult signDocumentDigest(char[] rawPin, String slotId, String documentHashHex)
             throws CryptoOperationException {
@@ -220,6 +263,12 @@ public class CryptoService {
         }
     }
 
+    /**
+     * Encodes an X.509 certificate into standard 64-column PEM format ({@code BEGIN/END CERTIFICATE}).
+     *
+     * @param certificate X.509 certificate extracted from the smart card keystore
+     * @return PEM-encoded certificate string
+     */
     public static String encodeCertificateToPem(X509Certificate certificate) {
         try {
             String b64 = Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(certificate.getEncoded());

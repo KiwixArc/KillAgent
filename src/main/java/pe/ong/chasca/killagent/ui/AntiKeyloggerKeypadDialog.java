@@ -20,13 +20,27 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Zero Trust Anti-Keylogger PIN modal featuring:
- * - Zero-String Memory Architecture: PIN digits exist solely inside a pre-allocated char[] buffer
- *   and never touch java.lang.String, JTextComponent Documents, or system clipboards.
- * - Cryptographically shuffled on-screen numeric keypad (SecureRandom per session).
- * - Optional physical keyboard lockout toggle (mouse-only anti-keylogger mode).
- * - Kernel-level Windows anti-screen-scraping via SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE / WDA_MONITOR).
- * - Instant Kill-Switch dismissal and buffer zeroization upon physical card removal.
+ * Zero Trust Anti-Keylogger PIN modal protecting smart-card PIN entry on the local workstation.
+ * <p>
+ * <strong>Memory, UI &amp; Native OS Security Invariants:</strong>
+ * <ul>
+ *     <li><strong>Zero-String Memory Architecture:</strong> PIN digits live strictly inside a
+ *     fixed 8-slot {@code char[]} ({@code secretBuffer}) and are masked solely via static bullet
+ *     lookup constants ({@link #BULLET_MASKS}). No {@link JPasswordField}, {@link javax.swing.text.Document},
+ *     {@link String}, or clipboard {@code TransferHandler} ever holds a secret digit.</li>
+ *     <li><strong>Per-Session Cryptographic Keypad Shuffle:</strong> Digits {@code 0..9} are shuffled
+ *     using {@link SecureRandom} on every invocation to defeat fixed-coordinate click-tracking malware.</li>
+ *     <li><strong>Physical Keyboard Filtering &amp; Mouse-Only Mode:</strong> A custom
+ *     {@link KeyEventDispatcher} blocks {@code Ctrl}/{@code Alt}/{@code Meta} shortcuts unconditionally and
+ *     can discard all physical numeric keystrokes when mouse-only mode is enabled.</li>
+ *     <li><strong>Kernel-Level Anti-Screen-Capture (JNA):</strong> On {@code windowOpened}, invokes
+ *     Windows {@code user32.dll!SetWindowDisplayAffinity} via JNA with {@code WDA_EXCLUDEFROMCAPTURE}
+ *     ({@code 0x00000011}) and falls back to {@code WDA_MONITOR} ({@code 0x00000001}), blocking BitBlt,
+ *     Desktop Duplication, and remote screen-sharing capture of the PIN dialog.</li>
+ *     <li><strong>Bounded Countdown &amp; Instant Kill-Switch:</strong> Enforces a default 30-second timeout
+ *     and immediately wipes {@code secretBuffer}/{@code deliveredPin} with {@code '\0'} on timeout, cancel,
+ *     window close, client disconnect, or physical smart-card removal ({@link #abortDueToCardRemoval()}).</li>
+ * </ul>
  */
 public class AntiKeyloggerKeypadDialog extends JDialog {
 
@@ -429,6 +443,12 @@ public class AntiKeyloggerKeypadDialog extends JDialog {
         abortWithReason(PinPromptProvider.AbortReason.CARD_REMOVED);
     }
 
+    /**
+     * Applies kernel-level Windows display affinity to the native {@code HWND} once the Swing window
+     * materializes, preventing BitBlt, DXGI Desktop Duplication, and screen-recording tools from capturing
+     * the PIN keypad. Prefers {@code WDA_EXCLUDEFROMCAPTURE} ({@code 0x11}, Windows 10 2004+/11) and falls
+     * back to {@code WDA_MONITOR} ({@code 0x01}) on older Windows builds; safely no-ops off Windows.
+     */
     private void applyAntiScreenCapture() {
         try {
             long windowHandle = Native.getWindowID(this);
