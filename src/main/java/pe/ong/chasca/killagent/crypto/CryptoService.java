@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
+import pe.ong.chasca.killagent.hardware.CardType;
+import pe.ong.chasca.killagent.hardware.HardwareListener;
 import pe.ong.chasca.killagent.hardware.HardwareStatus;
 import pe.ong.chasca.killagent.hardware.pkcs11.Pkcs11Bridge;
 import pe.ong.chasca.killagent.server.dto.ErrorCode;
@@ -56,6 +58,18 @@ public class CryptoService {
     private final CardReaderManager cardReaderManager;
     private final Pkcs11Bridge pkcs11Bridge;
     private final AtomicInteger hardwarePinAttemptEstimator = new AtomicInteger(3);
+    private volatile SigningCertificateInfo cachedSigningCertificate;
+
+    /**
+     * In-memory snapshot of the Non-Repudiation signing certificate for the active smartcard session.
+     */
+    public record SigningCertificateInfo(
+            String certificatePem,
+            String certificateDni,
+            String certificateSerialNumber
+    ) {
+        public static final SigningCertificateInfo EMPTY = new SigningCertificateInfo(null, null, null);
+    }
 
     /**
      * Constructs the cryptographic mediator wired to hardware status monitoring and PKCS#11 bridge.
@@ -72,6 +86,84 @@ public class CryptoService {
         this.config = config;
         this.cardReaderManager = cardReaderManager;
         this.pkcs11Bridge = pkcs11Bridge;
+        if (this.cardReaderManager != null) {
+            this.cardReaderManager.addListener(new HardwareListener() {
+                @Override
+                public void onCardInserted(String readerName, CardType cardType) {
+                    clearCachedSigningCertificate();
+                }
+
+                @Override
+                public void onCardRemoved(String readerName) {
+                    clearCachedSigningCertificate();
+                }
+
+                @Override
+                public void onReaderStatusChanged(boolean readerPresent, String readerName) {
+                    if (!readerPresent) {
+                        clearCachedSigningCertificate();
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * Clears any Non-Repudiation signing certificate cached in RAM for the current card session.
+     */
+    public void clearCachedSigningCertificate() {
+        this.cachedSigningCertificate = null;
+    }
+
+    /**
+     * Returns the in-memory cached signing certificate if a card is currently inserted and cached,
+     * or {@link Optional#empty()} without touching PKCS#11 or prompting for a PIN.
+     */
+    public Optional<SigningCertificateInfo> getCachedSigningCertificateIfPresent() {
+        HardwareStatus status = cardReaderManager != null ? cardReaderManager.getStatus() : null;
+        if (status == null || !status.readerPresent() || !status.cardPresent()) {
+            this.cachedSigningCertificate = null;
+            return Optional.empty();
+        }
+        return Optional.ofNullable(this.cachedSigningCertificate);
+    }
+
+    /**
+     * Returns the Non-Repudiation signing certificate without ever opening a PIN prompt.
+     * Uses the in-memory RAM cache from the current card session or, if unavailable, attempts
+     * an unauthenticated PKCS#11 public certificate lookup ({@code KeyStore.load(null, null)}).
+     *
+     * @return certificate details if obtainable without PIN, otherwise {@link SigningCertificateInfo#EMPTY}
+     */
+    public SigningCertificateInfo getSigningCertificateWithoutPin() {
+        HardwareStatus status = cardReaderManager != null ? cardReaderManager.getStatus() : null;
+        if (status == null || !status.readerPresent() || !status.cardPresent()) {
+            this.cachedSigningCertificate = null;
+            return SigningCertificateInfo.EMPTY;
+        }
+
+        SigningCertificateInfo cached = this.cachedSigningCertificate;
+        if (cached != null) {
+            return cached;
+        }
+
+        try {
+            Optional<File> dllOpt = pkcs11Bridge.findPkcs11Library(status.cardType());
+            if (dllOpt.isPresent()) {
+                Optional<X509Certificate> publicCert = pkcs11Bridge.findPublicSigningCertificate(dllOpt.get());
+                if (publicCert.isPresent()) {
+                    X509Certificate cert = publicCert.get();
+                    verifyCertificateValidity(cert);
+                    SigningCertificateInfo info = buildSigningCertificateInfo(cert);
+                    this.cachedSigningCertificate = info;
+                    return info;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Unauthenticated signing certificate lookup did not return a certificate: {}", e.getMessage());
+        }
+
+        return SigningCertificateInfo.EMPTY;
     }
 
     /**
@@ -126,6 +218,7 @@ public class CryptoService {
                 Map<String, String> meta = extractCertificateMetadata(cert);
                 enrichWithHardwareMetadata(meta);
                 cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
+                tryCacheNonRepudiationCertificate(ks);
 
                 logger.info("Authentication challenge signed via physical DNIe (alias={}, reader={}, serial={})",
                         authAlias, meta.get("readerName"), meta.get("certificateSerialNumber"));
@@ -233,17 +326,20 @@ public class CryptoService {
                 String pem = encodeCertificateToPem(cert);
                 Map<String, String> meta = extractCertificateMetadata(cert);
                 cardReaderManager.updateDetectedCardholderIdentity(meta.get("dni"), meta.get("fullName"));
+                String dni = meta.getOrDefault("dni", "UNKNOWN");
+                String serialNumber = meta.get("certificateSerialNumber");
+                this.cachedSigningCertificate = new SigningCertificateInfo(pem, dni, serialNumber);
 
                 logger.info("Document digest signed via physical DNIe Non-Repudiation key (alias={}, slotId={})",
                         signAlias, slotId);
 
                 return new DocumentDigestResult(
                         slotId.trim(),
-                        meta.getOrDefault("dni", "UNKNOWN"),
+                        dni,
                         cleanHashHex,
                         signatureValue,
                         formatCanonicalReniecDn(cert),
-                        meta.get("certificateSerialNumber"),
+                        serialNumber,
                         pem
                 );
             } catch (CryptoOperationException coe) {
@@ -381,6 +477,46 @@ public class CryptoService {
         throw new CryptoOperationException(
                 ErrorCode.PKCS11_ERROR,
                 "El DNIe insertado no contiene un certificado activo habilitado para " + missingType + "."
+        );
+    }
+
+    private void tryCacheNonRepudiationCertificate(KeyStore ks) {
+        try {
+            Enumeration<String> aliases = ks.aliases();
+            while (aliases.hasMoreElements()) {
+                String alias = aliases.nextElement();
+                if (!ks.isKeyEntry(alias)) {
+                    continue;
+                }
+                java.security.cert.Certificate rawCert = ks.getCertificate(alias);
+                if (!(rawCert instanceof X509Certificate cert)) {
+                    continue;
+                }
+                boolean[] keyUsage = cert.getKeyUsage();
+                boolean hasNonRepudiation = keyUsage != null && keyUsage.length > 1 && keyUsage[1];
+                String subjectDn = cert.getSubjectX500Principal() != null ? cert.getSubjectX500Principal().getName() : "";
+                if (hasNonRepudiation || FIR_SUBJECT_PATTERN.matcher(subjectDn).matches()) {
+                    verifyCertificateValidity(cert);
+                    this.cachedSigningCertificate = buildSigningCertificateInfo(cert);
+                    logger.debug("Cached Non-Repudiation certificate in RAM for current card session (alias={}).", alias);
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Could not cache Non-Repudiation certificate from auth session: {}", e.getMessage());
+        }
+    }
+
+    private static SigningCertificateInfo buildSigningCertificateInfo(X509Certificate cert) {
+        Map<String, String> meta = extractCertificateMetadata(cert);
+        String dni = meta.get("dni");
+        if (dni != null && dni.isBlank()) {
+            dni = null;
+        }
+        return new SigningCertificateInfo(
+                encodeCertificateToPem(cert),
+                dni,
+                meta.get("certificateSerialNumber")
         );
     }
 

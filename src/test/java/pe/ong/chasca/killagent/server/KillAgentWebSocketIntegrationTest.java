@@ -10,6 +10,9 @@ import org.junit.jupiter.api.Test;
 import pe.ong.chasca.killagent.config.AgentConfig;
 import pe.ong.chasca.killagent.crypto.CryptoService;
 import pe.ong.chasca.killagent.hardware.CardReaderManager;
+import pe.ong.chasca.killagent.security.SigningIntentPayload;
+import pe.ong.chasca.killagent.security.SigningIntentVerifier;
+import pe.ong.chasca.killagent.server.dto.SignedIntentEnvelope;
 import pe.ong.chasca.killagent.testsupport.MutableTestHardwareProbe;
 import pe.ong.chasca.killagent.testsupport.TestSoftTokenPkcs11Bridge;
 import pe.ong.chasca.killagent.ui.CardWaitProvider;
@@ -17,6 +20,13 @@ import pe.ong.chasca.killagent.ui.PinPromptProvider;
 
 import java.net.ServerSocket;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.time.Instant;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -845,6 +855,414 @@ class KillAgentWebSocketIntegrationTest {
             client1.closeBlocking();
             client2.closeBlocking();
         }
+    }
+
+    @Test
+    void testGetSigningCertificateWithoutPinOrCardNeverPromptsAndClearsOnRemoval() throws Exception {
+        CountDownLatch closedLatch = new CountDownLatch(1);
+        BlockingQueue<String> inbox = new LinkedBlockingQueue<>();
+
+        WebSocketClient client = createTestClient(ALLOWED_ORIGIN, inbox, closedLatch);
+        assertTrue(client.connectBlocking(3, TimeUnit.SECONDS));
+
+        try {
+            assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CONNECTION_ESTABLISHED
+
+            // 1. Card present, cache empty -> responds cleanly with null fields and 0 PIN prompts
+            client.send("""
+                    {
+                      "type": "GET_SIGNING_CERTIFICATE",
+                      "requestId": "req-cert-uncached"
+                    }
+                    """);
+            JsonNode uncachedRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("SIGNING_CERTIFICATE_RESPONSE", uncachedRes.get("type").asText());
+            assertEquals("req-cert-uncached", uncachedRes.get("requestId").asText());
+            assertTrue(uncachedRes.get("certificatePem").isNull());
+            assertTrue(uncachedRes.get("certificateDni").isNull());
+            assertTrue(uncachedRes.get("certificateSerialNumber").isNull());
+            assertEquals(0, pinPromptInvocationCount.get());
+            assertEquals(0, cardWaitInvocationCount.get());
+
+            // 2. Card removed -> still responds cleanly without prompting
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
+            assertEquals("CARD_REMOVED", mapper.readTree(inbox.poll(3, TimeUnit.SECONDS)).get("type").asText());
+
+            client.send("""
+                    {
+                      "type": "GET_SIGNING_CERTIFICATE",
+                      "requestId": "req-cert-no-card"
+                    }
+                    """);
+            JsonNode noCardRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("SIGNING_CERTIFICATE_RESPONSE", noCardRes.get("type").asText());
+            assertTrue(noCardRes.get("certificatePem").isNull());
+            assertEquals(0, pinPromptInvocationCount.get());
+            assertEquals(0, cardWaitInvocationCount.get());
+
+            // 3. Re-insert card, sign auth challenge once -> caches Non-Repudiation cert in RAM
+            hardwareProbe.insertCard();
+            readerManager.probeOnce(true);
+            assertEquals("CARD_INSERTED", mapper.readTree(inbox.poll(3, TimeUnit.SECONDS)).get("type").asText());
+
+            client.send("""
+                    {
+                      "type": "SIGN_AUTH_CHALLENGE",
+                      "requestId": "req-auth-warm-cache",
+                      "nonce": "a4f891e204b7c9103f8a12d4e567890123456789abcdef0123456789abcdef01"
+                    }
+                    """);
+            JsonNode authRes = mapper.readTree(inbox.poll(5, TimeUnit.SECONDS));
+            assertEquals("SUCCESS", authRes.get("status").asText());
+            assertEquals(1, pinPromptInvocationCount.get());
+
+            // 4. Subsequent GET_SIGNING_CERTIFICATE returns cached cert without triggering a 2nd PIN dialog
+            client.send("""
+                    {
+                      "type": "GET_SIGNING_CERTIFICATE",
+                      "requestId": "req-cert-cached"
+                    }
+                    """);
+            JsonNode cachedRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("SIGNING_CERTIFICATE_RESPONSE", cachedRes.get("type").asText());
+            assertEquals("req-cert-cached", cachedRes.get("requestId").asText());
+            assertTrue(cachedRes.get("certificatePem").asText().contains("BEGIN CERTIFICATE"));
+            assertEquals("71234567", cachedRes.get("certificateDni").asText());
+            assertFalse(cachedRes.get("certificateSerialNumber").asText().isBlank());
+            assertEquals(1, pinPromptInvocationCount.get(), "GET_SIGNING_CERTIFICATE must NEVER prompt for PIN");
+
+            // 5. Removing card immediately clears cached certificate
+            hardwareProbe.removeCard();
+            readerManager.probeOnce(true);
+            assertEquals("CARD_REMOVED", mapper.readTree(inbox.poll(3, TimeUnit.SECONDS)).get("type").asText());
+
+            client.send("""
+                    {
+                      "type": "GET_SIGNING_CERTIFICATE",
+                      "requestId": "req-cert-after-removal"
+                    }
+                    """);
+            JsonNode afterRemovalRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("SIGNING_CERTIFICATE_RESPONSE", afterRemovalRes.get("type").asText());
+            assertTrue(afterRemovalRes.get("certificatePem").isNull());
+            assertEquals(1, pinPromptInvocationCount.get());
+        } finally {
+            client.closeBlocking();
+        }
+    }
+
+    @Test
+    void testSignedIntentVerificationValidTamperedExpiredReplayAndE6InWebSocket() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("Ed25519");
+        KeyPair kp = kpg.generateKeyPair();
+        String pubB64 = Base64.getEncoder().encodeToString(kp.getPublic().getEncoded());
+
+        int intentPort;
+        try (ServerSocket s = new ServerSocket(0)) {
+            intentPort = s.getLocalPort();
+        }
+
+        AgentConfig intentConfig = new AgentConfig(
+                "development",
+                intentPort,
+                "127.0.0.1",
+                false,
+                "./keystore/loopback.p12",
+                "changeit",
+                Set.of(ALLOWED_ORIGIN),
+                "bit4ipki.dll",
+                "idplug-pkcs11.dll",
+                "auto",
+                false,
+                AgentConfig.DocumentDigestSignMode.PADES_DIGEST_INFO,
+                true,
+                true,
+                "stable",
+                AgentConfig.DEFAULT_UPDATE_MANIFEST_URL,
+                6,
+                "",
+                AgentConfig.DEFAULT_UPDATE_ALLOWED_HOSTS,
+                pubB64,
+                true
+        );
+
+        MutableTestHardwareProbe localProbe = new MutableTestHardwareProbe(true);
+        CardReaderManager localReaderManager = new CardReaderManager(intentConfig, localProbe);
+        localReaderManager.probeOnce(false);
+        CryptoService localCrypto = new CryptoService(
+                intentConfig,
+                localReaderManager,
+                new TestSoftTokenPkcs11Bridge(intentConfig, "71234567", "JUAN PEREZ GARCIA")
+        );
+
+        AtomicInteger localPinPrompts = new AtomicInteger(0);
+        AtomicReference<String> localPinDetails = new AtomicReference<>();
+        PinPromptProvider localPinProvider = new PinPromptProvider() {
+            @Override
+            public PinPromptResult requestPin(String title, String operationHtmlDetails) {
+                localPinPrompts.incrementAndGet();
+                localPinDetails.set(operationHtmlDetails);
+                return new PinPromptResult(new char[]{'1', '2', '3', '4', '5', '6'}, AbortReason.NONE);
+            }
+
+            @Override
+            public PinPromptResult requestPin(String title, String operationHtmlDetails, int timeoutSeconds) {
+                return requestPin(title, operationHtmlDetails);
+            }
+
+            @Override
+            public void abortActivePromptForCardRemoval() {
+            }
+
+            @Override
+            public void abortActivePrompt(AbortReason reason) {
+            }
+        };
+
+        KillAgentWebSocketServer intentServer = new KillAgentWebSocketServer(
+                intentConfig,
+                localReaderManager,
+                localCrypto,
+                null,
+                localPinProvider
+        );
+        intentServer.start();
+        assertTrue(intentServer.awaitStart(5, TimeUnit.SECONDS));
+
+        BlockingQueue<String> inbox = new LinkedBlockingQueue<>();
+        CountDownLatch closedLatch = new CountDownLatch(1);
+        WebSocketClient client = new WebSocketClient(
+                URI.create("ws://127.0.0.1:" + intentPort),
+                Map.of("Origin", ALLOWED_ORIGIN)
+        ) {
+            @Override
+            public void onOpen(ServerHandshake handshakedata) {}
+
+            @Override
+            public void onMessage(String message) {
+                inbox.offer(message);
+            }
+
+            @Override
+            public void onClose(int code, String reason, boolean remote) {
+                closedLatch.countDown();
+            }
+
+            @Override
+            public void onError(Exception ex) {}
+        };
+
+        try {
+            assertTrue(client.connectBlocking(3, TimeUnit.SECONDS));
+            assertNotNull(inbox.poll(3, TimeUnit.SECONDS)); // CONNECTION_ESTABLISHED
+
+            String docHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            String slotId = "slot-signed-001";
+            String futureIso = Instant.now().plusSeconds(300).toString();
+
+            // 1. Missing signingIntent when requireSignedIntent=true -> INVALID_SIGNING_INTENT
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-missing-intent",
+                      "slotId": "%s",
+                      "documentHash": "%s",
+                      "documentTitle": "Fake.pdf",
+                      "signerRole": "SIGNER"
+                    }
+                    """.formatted(slotId, docHash));
+            JsonNode missingRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("ERROR", missingRes.get("type").asText());
+            assertEquals("INVALID_SIGNING_INTENT", missingRes.get("errorCode").asText());
+            assertEquals(0, localPinPrompts.get());
+
+            // 2. Valid Ed25519 signingIntent for SIGN_DOCUMENT_DIGEST -> SUCCESS, and WYSIWYS uses signed fields only
+            SigningIntentPayload validDocPayload = new SigningIntentPayload(
+                    "intent-ws-doc-1",
+                    SigningIntentVerifier.OPERATION_SIGN_DOCUMENT_DIGEST,
+                    slotId,
+                    docHash,
+                    "Resolución Oficial Firmada.pdf",
+                    "DIRECTOR_EJECUTIVO",
+                    "71234567",
+                    futureIso
+            );
+            SignedIntentEnvelope validDocEnvelope = signIntent(validDocPayload, kp.getPrivate(), "kid-ws-1");
+            String envelopeJson = mapper.writeValueAsString(validDocEnvelope);
+
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-valid-intent",
+                      "slotId": "%s",
+                      "documentHash": "%s",
+                      "documentTitle": "SPOOFED_TITLE_ATTACKER.pdf",
+                      "signerRole": "SPOOFED_ROLE",
+                      "signingIntent": %s
+                    }
+                    """.formatted(slotId, docHash, envelopeJson));
+            JsonNode validDocRes = mapper.readTree(inbox.poll(5, TimeUnit.SECONDS));
+            assertEquals("SIGN_DOCUMENT_DIGEST_RESPONSE", validDocRes.get("type").asText());
+            assertEquals("SUCCESS", validDocRes.get("status").asText());
+            assertEquals(1, localPinPrompts.get());
+            assertTrue(localPinDetails.get().contains("Resolución Oficial Firmada.pdf"));
+            assertTrue(localPinDetails.get().contains("DIRECTOR_EJECUTIVO"));
+            assertFalse(localPinDetails.get().contains("SPOOFED_TITLE_ATTACKER.pdf"));
+            assertFalse(localPinDetails.get().contains("SPOOFED_ROLE"));
+
+            // 3. Replay of the same intentId -> INVALID_SIGNING_INTENT (PIN prompt NOT called)
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-replay-intent",
+                      "slotId": "%s",
+                      "documentHash": "%s",
+                      "signingIntent": %s
+                    }
+                    """.formatted(slotId, docHash, envelopeJson));
+            JsonNode replayRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("ERROR", replayRes.get("type").asText());
+            assertEquals("INVALID_SIGNING_INTENT", replayRes.get("errorCode").asText());
+            assertEquals(1, localPinPrompts.get());
+
+            // 4. Tampered signature -> INVALID_SIGNING_INTENT
+            byte[] sigBytes = Base64.getUrlDecoder().decode(validDocEnvelope.signatureBase64Url());
+            sigBytes[0] ^= 0x1A;
+            SignedIntentEnvelope tamperedEnvelope = new SignedIntentEnvelope(
+                    validDocEnvelope.payloadBase64Url(),
+                    Base64.getUrlEncoder().withoutPadding().encodeToString(sigBytes),
+                    "Ed25519",
+                    "kid-ws-1"
+            );
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-tampered-intent",
+                      "slotId": "%s",
+                      "documentHash": "%s",
+                      "signingIntent": %s
+                    }
+                    """.formatted(slotId, docHash, mapper.writeValueAsString(tamperedEnvelope)));
+            JsonNode tamperedRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("INVALID_SIGNING_INTENT", tamperedRes.get("errorCode").asText());
+            assertEquals(1, localPinPrompts.get());
+
+            // 5. Expired intent -> INVALID_SIGNING_INTENT
+            SigningIntentPayload expiredPayload = new SigningIntentPayload(
+                    "intent-ws-expired",
+                    SigningIntentVerifier.OPERATION_SIGN_DOCUMENT_DIGEST,
+                    slotId,
+                    docHash,
+                    "Expired.pdf",
+                    "SIGNER",
+                    "71234567",
+                    Instant.now().minusSeconds(30).toString()
+            );
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-expired-intent",
+                      "slotId": "%s",
+                      "documentHash": "%s",
+                      "signingIntent": %s
+                    }
+                    """.formatted(slotId, docHash, mapper.writeValueAsString(signIntent(expiredPayload, kp.getPrivate(), "kid-ws-1"))));
+            JsonNode expiredRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("INVALID_SIGNING_INTENT", expiredRes.get("errorCode").asText());
+            assertEquals(1, localPinPrompts.get());
+
+            // 6. E6 substitution: outer documentHash differs from signed intent -> INVALID_SIGNING_INTENT
+            SigningIntentPayload e6HashPayload = new SigningIntentPayload(
+                    "intent-ws-e6-hash",
+                    SigningIntentVerifier.OPERATION_SIGN_DOCUMENT_DIGEST,
+                    slotId,
+                    docHash,
+                    "Legit.pdf",
+                    "SIGNER",
+                    "71234567",
+                    futureIso
+            );
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-e6-hash",
+                      "slotId": "%s",
+                      "documentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "signingIntent": %s
+                    }
+                    """.formatted(slotId, mapper.writeValueAsString(signIntent(e6HashPayload, kp.getPrivate(), "kid-ws-1"))));
+            JsonNode e6HashRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("INVALID_SIGNING_INTENT", e6HashRes.get("errorCode").asText());
+            assertEquals(1, localPinPrompts.get());
+
+            // 7. E6 substitution: outer slotId differs from signed intent -> INVALID_SIGNING_INTENT
+            SigningIntentPayload e6SlotPayload = new SigningIntentPayload(
+                    "intent-ws-e6-slot",
+                    SigningIntentVerifier.OPERATION_SIGN_DOCUMENT_DIGEST,
+                    slotId,
+                    docHash,
+                    "Legit.pdf",
+                    "SIGNER",
+                    "71234567",
+                    futureIso
+            );
+            client.send("""
+                    {
+                      "type": "SIGN_DOCUMENT_DIGEST",
+                      "requestId": "req-e6-slot",
+                      "slotId": "slot-attacker-999",
+                      "documentHash": "%s",
+                      "signingIntent": %s
+                    }
+                    """.formatted(docHash, mapper.writeValueAsString(signIntent(e6SlotPayload, kp.getPrivate(), "kid-ws-1"))));
+            JsonNode e6SlotRes = mapper.readTree(inbox.poll(3, TimeUnit.SECONDS));
+            assertEquals("INVALID_SIGNING_INTENT", e6SlotRes.get("errorCode").asText());
+            assertEquals(1, localPinPrompts.get());
+
+            // 8. Valid Ed25519 signingIntent for SIGN_AUTH_CHALLENGE -> SUCCESS
+            String authNonce = "nonce-auth-signed-999";
+            SigningIntentPayload authPayload = new SigningIntentPayload(
+                    "intent-ws-auth-1",
+                    SigningIntentVerifier.OPERATION_SIGN_AUTH_CHALLENGE,
+                    null,
+                    authNonce,
+                    null,
+                    null,
+                    "71234567",
+                    futureIso
+            );
+            client.send("""
+                    {
+                      "type": "SIGN_AUTH_CHALLENGE",
+                      "requestId": "req-valid-auth-intent",
+                      "nonce": "%s",
+                      "signingIntent": %s
+                    }
+                    """.formatted(authNonce, mapper.writeValueAsString(signIntent(authPayload, kp.getPrivate(), "kid-ws-1"))));
+            JsonNode authRes = mapper.readTree(inbox.poll(5, TimeUnit.SECONDS));
+            assertEquals("SIGN_AUTH_CHALLENGE_RESPONSE", authRes.get("type").asText());
+            assertEquals("SUCCESS", authRes.get("status").asText());
+            assertEquals(2, localPinPrompts.get());
+        } finally {
+            client.closeBlocking();
+            intentServer.shutdownCleanly(1000);
+            localReaderManager.stop();
+        }
+    }
+
+    private SignedIntentEnvelope signIntent(
+            SigningIntentPayload payload,
+            PrivateKey privateKey,
+            String keyId
+    ) throws Exception {
+        byte[] jsonBytes = mapper.writeValueAsBytes(payload);
+        String payloadB64Url = Base64.getUrlEncoder().withoutPadding().encodeToString(jsonBytes);
+        Signature signer = Signature.getInstance("Ed25519");
+        signer.initSign(privateKey);
+        signer.update(payloadB64Url.getBytes(StandardCharsets.UTF_8));
+        String sigB64Url = Base64.getUrlEncoder().withoutPadding().encodeToString(signer.sign());
+        return new SignedIntentEnvelope(payloadB64Url, sigB64Url, "Ed25519", keyId);
     }
 
     private WebSocketClient createTestClient(

@@ -119,6 +119,46 @@ class WebSocketProtocolSerializationTest {
         assertTrue(json.contains("\"type\":\"ERROR\""));
         assertTrue(json.contains("\"errorCode\":\"PIN_INCORRECT\""));
         assertTrue(json.contains("\"attemptsRemaining\":2"));
+
+        ErrorMessage intentErr = new ErrorMessage("req-3", ErrorCode.INVALID_SIGNING_INTENT, "Firma Ed25519 inválida.");
+        String intentJson = mapper.writeValueAsString(intentErr);
+        assertTrue(intentJson.contains("\"errorCode\":\"INVALID_SIGNING_INTENT\""));
+    }
+
+    @Test
+    void testSigningCertificateResponseSerializationIncludesNulls() throws Exception {
+        SigningCertificateResponseMessage emptyRes =
+                new SigningCertificateResponseMessage("req-cert-1", null, null, null);
+        String json = mapper.writeValueAsString(emptyRes);
+        assertTrue(json.contains("\"type\":\"SIGNING_CERTIFICATE_RESPONSE\""));
+        assertTrue(json.contains("\"requestId\":\"req-cert-1\""));
+        assertTrue(json.contains("\"certificatePem\":null"));
+        assertTrue(json.contains("\"certificateDni\":null"));
+        assertTrue(json.contains("\"certificateSerialNumber\":null"));
+    }
+
+    @Test
+    void testSignDocumentDigestRequestWithOptionalSigningIntent() throws Exception {
+        String json = """
+                {
+                  "type": "SIGN_DOCUMENT_DIGEST",
+                  "requestId": "req-doc-1",
+                  "slotId": "slot-1",
+                  "documentHash": "abcd",
+                  "documentTitle": "Doc.pdf",
+                  "signerRole": "SIGNER",
+                  "signingIntent": {
+                    "payloadBase64Url": "eyJpbnRlbnRJZCI6IjEifQ",
+                    "signatureBase64Url": "c2ln",
+                    "algorithm": "Ed25519",
+                    "keyId": "k1"
+                  }
+                }
+                """;
+        SignDocumentDigestRequest req = mapper.readValue(json, SignDocumentDigestRequest.class);
+        assertNotNull(req.signingIntent());
+        assertEquals("Ed25519", req.signingIntent().algorithm());
+        assertEquals("k1", req.signingIntent().keyId());
     }
 }
 

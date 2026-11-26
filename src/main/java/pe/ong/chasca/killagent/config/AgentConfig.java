@@ -28,7 +28,9 @@ public record AgentConfig(
         String updateManifestUrl,
         int updateCheckIntervalHours,
         String updateSigningPublicKey,
-        Set<String> updateAllowedHosts
+        Set<String> updateAllowedHosts,
+        String backendIntentPublicKey,
+        boolean requireSignedIntent
 ) {
     public static final String DEFAULT_UPDATE_MANIFEST_URL =
             "https://github.com/KiwixArc/KillAgent/releases/latest/download/update-manifest.json";
@@ -92,6 +94,7 @@ public record AgentConfig(
         }
         updateCheckIntervalHours = Math.max(1, updateCheckIntervalHours);
         updateSigningPublicKey = updateSigningPublicKey != null ? updateSigningPublicKey.trim() : "";
+        backendIntentPublicKey = backendIntentPublicKey != null ? backendIntentPublicKey.trim() : "";
 
         Set<String> hostsSource = (updateAllowedHosts == null || updateAllowedHosts.isEmpty())
                 ? DEFAULT_UPDATE_ALLOWED_HOSTS
@@ -100,7 +103,56 @@ public record AgentConfig(
     }
 
     /**
-     * Convenience constructor defaulting PAdES digest framing and GitHub Releases auto-update settings.
+     * Backward-compatible 19-argument constructor defaulting signed-intent verification to disabled.
+     */
+    public AgentConfig(
+            String environment,
+            int port,
+            String host,
+            boolean secureWss,
+            String keystorePath,
+            String keystorePassword,
+            Set<String> allowedOrigins,
+            String reniecPkcs11DllPathDni2,
+            String reniecPkcs11DllPathDni3,
+            String uiTheme,
+            boolean showBalloonNotifications,
+            DocumentDigestSignMode documentDigestSignMode,
+            boolean updateEnabled,
+            boolean updateAutoCheckEnabled,
+            String updateChannel,
+            String updateManifestUrl,
+            int updateCheckIntervalHours,
+            String updateSigningPublicKey,
+            Set<String> updateAllowedHosts
+    ) {
+        this(
+                environment,
+                port,
+                host,
+                secureWss,
+                keystorePath,
+                keystorePassword,
+                allowedOrigins,
+                reniecPkcs11DllPathDni2,
+                reniecPkcs11DllPathDni3,
+                uiTheme,
+                showBalloonNotifications,
+                documentDigestSignMode,
+                updateEnabled,
+                updateAutoCheckEnabled,
+                updateChannel,
+                updateManifestUrl,
+                updateCheckIntervalHours,
+                updateSigningPublicKey,
+                updateAllowedHosts,
+                "",
+                false
+        );
+    }
+
+    /**
+     * Convenience constructor defaulting PAdES digest framing, auto-update, and signed-intent settings.
      */
     public AgentConfig(
             String environment,
@@ -134,7 +186,9 @@ public record AgentConfig(
                 DEFAULT_UPDATE_MANIFEST_URL,
                 6,
                 "",
-                DEFAULT_UPDATE_ALLOWED_HOSTS
+                DEFAULT_UPDATE_ALLOWED_HOSTS,
+                "",
+                false
         );
     }
 

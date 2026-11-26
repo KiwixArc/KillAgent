@@ -25,6 +25,8 @@ import pe.ong.chasca.killagent.hardware.HardwareListener;
 import pe.ong.chasca.killagent.hardware.HardwareStatus;
 import pe.ong.chasca.killagent.security.LoopbackSslContextFactory;
 import pe.ong.chasca.killagent.security.OriginValidator;
+import pe.ong.chasca.killagent.security.SigningIntentPayload;
+import pe.ong.chasca.killagent.security.SigningIntentVerifier;
 import pe.ong.chasca.killagent.server.dto.*;
 import pe.ong.chasca.killagent.ui.CardWaitProvider;
 import pe.ong.chasca.killagent.ui.PinPromptProvider;
@@ -35,6 +37,7 @@ import pe.ong.chasca.killagent.ui.SystemTrayManager;
 import javax.net.ssl.SSLContext;
 import java.net.InetSocketAddress;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -86,6 +89,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
     private final PinPromptProvider pinPromptProvider;
     private final CardWaitProvider cardWaitProvider;
     private final OriginValidator originValidator;
+    private final SigningIntentVerifier signingIntentVerifier;
     private final ObjectMapper objectMapper;
 
     private final Map<WebSocket, String> connectionIds = new ConcurrentHashMap<>();
@@ -93,6 +97,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
     private final AtomicReference<WebSocket> activeOperationConnection = new AtomicReference<>();
     private final AtomicReference<String> activeOperationRequestId = new AtomicReference<>();
     private final ExecutorService cryptoWorkerExecutor;
+    private final ExecutorService certificateQueryExecutor;
     private final CountDownLatch startedLatch = new CountDownLatch(1);
 
     public KillAgentWebSocketServer(
@@ -130,9 +135,15 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         this.pinPromptProvider = pinPromptProvider != null ? pinPromptProvider : new SwingPinPromptProvider();
         this.cardWaitProvider = cardWaitProvider != null ? cardWaitProvider : new SwingCardWaitProvider();
         this.originValidator = new OriginValidator(config);
+        this.signingIntentVerifier = new SigningIntentVerifier(config);
         this.objectMapper = new ObjectMapper();
         this.cryptoWorkerExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "killagent-crypto-worker");
+            t.setDaemon(true);
+            return t;
+        });
+        this.certificateQueryExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "killagent-cert-query");
             t.setDaemon(true);
             return t;
         });
@@ -264,6 +275,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
             switch (type) {
                 case "SIGN_AUTH_CHALLENGE" -> handleSignAuthChallenge(conn, root, requestId);
                 case "SIGN_DOCUMENT_DIGEST" -> handleSignDocumentDigest(conn, root, requestId);
+                case "GET_SIGNING_CERTIFICATE" -> handleGetSigningCertificate(conn, requestId);
                 case "CANCEL_ACTIVE_OPERATION" -> handleCancelActiveOperation(conn, requestId);
                 case "GET_HARDWARE_STATUS", "PING" -> sendJson(
                         conn,
@@ -282,6 +294,49 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
             logger.warn("Malformed JSON frame received: {}", e.getMessage());
             sendJson(conn, new ErrorMessage(null, ErrorCode.MALFORMED_REQUEST, "Formato JSON inválido."));
         }
+    }
+
+    private void handleGetSigningCertificate(WebSocket conn, String requestId) {
+        if (!cardReaderManager.getStatus().cardPresent()) {
+            cryptoService.clearCachedSigningCertificate();
+            sendJson(conn, new SigningCertificateResponseMessage(requestId, null, null, null));
+            return;
+        }
+
+        Optional<CryptoService.SigningCertificateInfo> cached = cryptoService.getCachedSigningCertificateIfPresent();
+        if (cached.isPresent()) {
+            CryptoService.SigningCertificateInfo info = cached.get();
+            sendJson(conn, new SigningCertificateResponseMessage(
+                    requestId,
+                    info.certificatePem(),
+                    info.certificateDni(),
+                    info.certificateSerialNumber()
+            ));
+            return;
+        }
+
+        if (isHardwareOperationInProgress()) {
+            sendJson(conn, new SigningCertificateResponseMessage(requestId, null, null, null));
+            return;
+        }
+
+        certificateQueryExecutor.submit(() -> {
+            try {
+                if (!conn.isOpen()) {
+                    return;
+                }
+                CryptoService.SigningCertificateInfo info = cryptoService.getSigningCertificateWithoutPin();
+                sendJson(conn, new SigningCertificateResponseMessage(
+                        requestId,
+                        info.certificatePem(),
+                        info.certificateDni(),
+                        info.certificateSerialNumber()
+                ));
+            } catch (Exception e) {
+                logger.debug("Non-blocking GET_SIGNING_CERTIFICATE failed cleanly: {}", e.getMessage());
+                sendJson(conn, new SigningCertificateResponseMessage(requestId, null, null, null));
+            }
+        });
     }
 
     private void handleCancelActiveOperation(WebSocket conn, String requestId) {
@@ -310,6 +365,22 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         if (request.nonce() == null || request.nonce().isBlank()) {
             sendJson(conn, new ErrorMessage(requestId, ErrorCode.MALFORMED_REQUEST, "El campo 'nonce' es obligatorio."));
             return;
+        }
+
+        if (config.requireSignedIntent() || request.signingIntent() != null) {
+            try {
+                signingIntentVerifier.verifyAndConsume(
+                        request.signingIntent(),
+                        SigningIntentVerifier.OPERATION_SIGN_AUTH_CHALLENGE,
+                        request.nonce(),
+                        null
+                );
+            } catch (SigningIntentVerifier.InvalidSigningIntentException ex) {
+                logger.warn("Rejected SIGN_AUTH_CHALLENGE due to invalid signingIntent (requestId={}): {}",
+                        requestId, ex.getMessage());
+                sendJson(conn, new ErrorMessage(requestId, ErrorCode.INVALID_SIGNING_INTENT, ex.getMessage()));
+                return;
+            }
         }
 
         boolean waitForCard = Boolean.TRUE.equals(request.waitForCard());
@@ -420,6 +491,25 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
             return;
         }
 
+        final SigningIntentPayload verifiedIntent;
+        if (config.requireSignedIntent() || request.signingIntent() != null) {
+            try {
+                verifiedIntent = signingIntentVerifier.verifyAndConsume(
+                        request.signingIntent(),
+                        SigningIntentVerifier.OPERATION_SIGN_DOCUMENT_DIGEST,
+                        request.documentHash(),
+                        request.slotId()
+                );
+            } catch (SigningIntentVerifier.InvalidSigningIntentException ex) {
+                logger.warn("Rejected SIGN_DOCUMENT_DIGEST due to invalid signingIntent (requestId={}): {}",
+                        requestId, ex.getMessage());
+                sendJson(conn, new ErrorMessage(requestId, ErrorCode.INVALID_SIGNING_INTENT, ex.getMessage()));
+                return;
+            }
+        } else {
+            verifiedIntent = null;
+        }
+
         if (!cardReaderManager.getStatus().cardPresent()) {
             sendJson(conn, new ErrorMessage(requestId, ErrorCode.CARD_NOT_PRESENT, "Inserte su DNIe en el lector para firmar el documento."));
             return;
@@ -445,13 +535,18 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
                     }
                     if (trayManager != null) trayManager.setBusyState(true);
 
-                    // Sanitize untrusted strings against Swing HTML tag injection
-                    String safeTitle = escapeHtml(request.documentTitle() != null && !request.documentTitle().isBlank()
-                            ? request.documentTitle()
+                    // When verifiedIntent is present, display ONLY trusted backend-signed WYSIWYS fields
+                    String rawTitle = verifiedIntent != null ? verifiedIntent.documentTitle() : request.documentTitle();
+                    String rawHash = verifiedIntent != null ? verifiedIntent.documentHash() : request.documentHash();
+                    String rawRole = verifiedIntent != null ? verifiedIntent.signerRole() : request.signerRole();
+
+                    // Sanitize strings against Swing HTML tag injection
+                    String safeTitle = escapeHtml(rawTitle != null && !rawTitle.isBlank()
+                            ? rawTitle
                             : "Documento Institucional");
-                    String safeHashPreview = escapeHtml(truncateHash(request.documentHash().trim()));
-                    String safeRole = escapeHtml(request.signerRole() != null && !request.signerRole().isBlank()
-                            ? request.signerRole()
+                    String safeHashPreview = escapeHtml(truncateHash(rawHash.trim()));
+                    String safeRole = escapeHtml(rawRole != null && !rawRole.isBlank()
+                            ? rawRole
                             : "SIGNER");
 
                     String detailsHtml = "Firma Digital PAdES-LTV: <b>" + safeTitle + "</b>"
@@ -474,10 +569,12 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
                         return;
                     }
 
+                    String effectiveSlotId = verifiedIntent != null ? verifiedIntent.slotId() : request.slotId();
+                    String effectiveHash = verifiedIntent != null ? verifiedIntent.documentHash() : request.documentHash();
                     DocumentDigestResult result = cryptoService.signDocumentDigest(
                             pinPrompt.pin(),
-                            request.slotId(),
-                            request.documentHash()
+                            effectiveSlotId,
+                            effectiveHash
                     );
 
                     SignDocumentDigestResponse response = SignDocumentDigestResponse.success(
@@ -592,6 +689,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
         this.cardWaitProvider.abortActiveWait(CardWaitProvider.WaitOutcome.CLIENT_DISCONNECTED);
         this.pinPromptProvider.abortActivePromptForCardRemoval();
         this.cryptoWorkerExecutor.shutdownNow();
+        this.certificateQueryExecutor.shutdownNow();
         try {
             stop(timeoutMs);
         } catch (Exception e) {
@@ -687,6 +785,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
     @Override
     public void onCardRemoved(String readerName) {
         logger.info("Broadcasting unsolicited CARD_REMOVED (Kill-Switch) event to all active clients.");
+        cryptoService.clearCachedSigningCertificate();
         pinPromptProvider.abortActivePromptForCardRemoval();
         broadcastJson(new CardRemovedNotification());
     }
@@ -695,6 +794,7 @@ public class KillAgentWebSocketServer extends WebSocketServer implements Hardwar
     public void onReaderStatusChanged(boolean readerPresent, String readerName) {
         if (!readerPresent) {
             logger.info("Smart card reader unplugged; ensuring active PIN prompts are aborted.");
+            cryptoService.clearCachedSigningCertificate();
             pinPromptProvider.abortActivePromptForCardRemoval();
         }
         logger.info("Broadcasting unsolicited READER_STATUS_CHANGED event (readerPresent={}, reader={}).",

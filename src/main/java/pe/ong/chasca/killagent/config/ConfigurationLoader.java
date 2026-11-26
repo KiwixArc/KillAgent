@@ -86,6 +86,12 @@ public final class ConfigurationLoader {
         );
         Set<String> updateAllowedHosts = parseCsvSet(updateHostsRaw, true);
 
+        String backendIntentPublicKey = resolve("BACKEND_INTENT_PUBLIC_KEY", localDotenv, userDotenv, defaults, "");
+        String defaultRequireSignedIntent = backendIntentPublicKey.isBlank() ? "false" : "true";
+        boolean requireSignedIntent = Boolean.parseBoolean(
+                resolve("REQUIRE_SIGNED_INTENT", localDotenv, userDotenv, defaults, defaultRequireSignedIntent)
+        );
+
         AgentConfig config = new AgentConfig(
                 environment,
                 port,
@@ -105,17 +111,20 @@ public final class ConfigurationLoader {
                 updateManifestUrl,
                 updateIntervalHours,
                 updateSigningPublicKey,
-                updateAllowedHosts
+                updateAllowedHosts,
+                backendIntentPublicKey,
+                requireSignedIntent
         );
 
-        logger.info("Configuration loaded: version={}, env={}, endpoint={}://{}:{}, digestMode={}, updateChannel={}",
+        logger.info("Configuration loaded: version={}, env={}, endpoint={}://{}:{}, digestMode={}, updateChannel={}, requireSignedIntent={}",
                 AgentVersion.getVersion(),
                 config.environment(),
                 config.secureWss() ? "wss" : "ws",
                 config.host(),
                 config.port(),
                 config.documentDigestSignMode(),
-                config.updateChannel());
+                config.updateChannel(),
+                config.requireSignedIntent());
         return config;
     }
 

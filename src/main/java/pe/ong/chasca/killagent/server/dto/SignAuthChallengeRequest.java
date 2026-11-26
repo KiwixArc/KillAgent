@@ -27,10 +27,26 @@ public record SignAuthChallengeRequest(
         @JsonProperty("nonce") String nonce,
         @JsonProperty("operationTitle") String operationTitle,
         @JsonProperty("operationDescription") String operationDescription,
-        @JsonProperty("waitForCard") Boolean waitForCard
+        @JsonProperty("waitForCard") Boolean waitForCard,
+        @JsonProperty("signingIntent") SignedIntentEnvelope signingIntent
 ) {
     /**
-     * Backward-compatible constructor defaulting {@code waitForCard} to {@link Boolean#FALSE}.
+     * Backward-compatible constructor defaulting {@code signingIntent} to {@code null}.
+     */
+    public SignAuthChallengeRequest(
+            String type,
+            String requestId,
+            String nonce,
+            String operationTitle,
+            String operationDescription,
+            Boolean waitForCard
+    ) {
+        this(type, requestId, nonce, operationTitle, operationDescription, waitForCard, null);
+    }
+
+    /**
+     * Backward-compatible constructor defaulting {@code waitForCard} to {@link Boolean#FALSE}
+     * and {@code signingIntent} to {@code null}.
      *
      * @param type                 command discriminator
      * @param requestId            client correlation identifier
@@ -45,6 +61,6 @@ public record SignAuthChallengeRequest(
             String operationTitle,
             String operationDescription
     ) {
-        this(type, requestId, nonce, operationTitle, operationDescription, Boolean.FALSE);
+        this(type, requestId, nonce, operationTitle, operationDescription, Boolean.FALSE, null);
     }
 }

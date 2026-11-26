@@ -260,24 +260,15 @@ public class Pkcs11Bridge {
                     KeyStore ks = KeyStore.getInstance("PKCS11", probeProvider);
                     ks.load(null, null);
 
-                    Enumeration<String> aliases = ks.aliases();
-                    while (aliases.hasMoreElements()) {
-                        String alias = aliases.nextElement();
-                        Certificate cert = ks.getCertificate(alias);
-                        if (cert instanceof X509Certificate x509) {
-                            boolean[] ku = x509.getKeyUsage();
-                            boolean hasNonRepudiation = ku != null && ku.length > 1 && ku[1];
-                            String subjectDn = x509.getSubjectX500Principal() != null
-                                    ? x509.getSubjectX500Principal().getName()
-                                    : "";
-                            if (hasNonRepudiation || FIR_SUBJECT_PATTERN.matcher(subjectDn).matches()) {
-                                preferredSlots.add(slotIndex);
-                                logger.info(
-                                        "Detected Non-Repudiation (FIR) certificate on slotListIndex={} [Subject={}]",
-                                        slotIndex, subjectDn);
-                                break;
-                            }
-                        }
+                    Optional<X509Certificate> nonRepudiationCert = findNonRepudiationCertificate(ks);
+                    if (nonRepudiationCert.isPresent()) {
+                        String subjectDn = nonRepudiationCert.get().getSubjectX500Principal() != null
+                                ? nonRepudiationCert.get().getSubjectX500Principal().getName()
+                                : "";
+                        preferredSlots.add(slotIndex);
+                        logger.info(
+                                "Detected Non-Repudiation (FIR) certificate on slotListIndex={} [Subject={}]",
+                                slotIndex, subjectDn);
                     }
                 } catch (Exception ex) {
                     logger.debug("Unauthenticated public slot probe skipped slotListIndex={}: {}",
@@ -293,6 +284,56 @@ public class Pkcs11Bridge {
             ordered.add(slotIndex);
         }
         return new ArrayList<>(ordered);
+    }
+
+    /**
+     * Attempts an unauthenticated, read-only lookup ({@code KeyStore.load(null, null)}, never invoking
+     * {@code C_Login}) of the Non-Repudiation ({@code FIR}) X.509 certificate across PKCS#11 slots.
+     *
+     * @param libraryFile native PKCS#11 middleware DLL file
+     * @return public Non-Repudiation certificate if readable without PIN, or {@link Optional#empty()}
+     */
+    public synchronized Optional<X509Certificate> findPublicSigningCertificate(File libraryFile) {
+        if (libraryFile == null || !libraryFile.isFile() || activeProvider != null) {
+            return Optional.empty();
+        }
+        for (int slotIndex = 0; slotIndex < MAX_SLOT_SCAN_INDEX; slotIndex++) {
+            Provider probeProvider = null;
+            try {
+                probeProvider = configureSlotProvider(libraryFile, slotIndex);
+                KeyStore ks = KeyStore.getInstance("PKCS11", probeProvider);
+                ks.load(null, null);
+                Optional<X509Certificate> cert = findNonRepudiationCertificate(ks);
+                if (cert.isPresent()) {
+                    return cert;
+                }
+            } catch (Exception ex) {
+                logger.debug("Unauthenticated signing certificate lookup skipped slotListIndex={}: {}",
+                        slotIndex, ex.getMessage());
+            } finally {
+                logoutAndUnload(probeProvider);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<X509Certificate> findNonRepudiationCertificate(KeyStore ks) throws Exception {
+        Enumeration<String> aliases = ks.aliases();
+        while (aliases.hasMoreElements()) {
+            String alias = aliases.nextElement();
+            Certificate cert = ks.getCertificate(alias);
+            if (cert instanceof X509Certificate x509) {
+                boolean[] ku = x509.getKeyUsage();
+                boolean hasNonRepudiation = ku != null && ku.length > 1 && ku[1];
+                String subjectDn = x509.getSubjectX500Principal() != null
+                        ? x509.getSubjectX500Principal().getName()
+                        : "";
+                if (hasNonRepudiation || FIR_SUBJECT_PATTERN.matcher(subjectDn).matches()) {
+                    return Optional.of(x509);
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private Provider configureSlotProvider(File libraryFile, int slotListIndex) throws Exception {

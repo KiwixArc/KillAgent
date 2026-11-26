@@ -25,5 +25,20 @@ public record SignDocumentDigestRequest(
         @JsonProperty("slotId") String slotId,
         @JsonProperty("documentHash") String documentHash,
         @JsonProperty("documentTitle") String documentTitle,
-        @JsonProperty("signerRole") String signerRole
-) {}
+        @JsonProperty("signerRole") String signerRole,
+        @JsonProperty("signingIntent") SignedIntentEnvelope signingIntent
+) {
+    /**
+     * Backward-compatible constructor defaulting {@code signingIntent} to {@code null}.
+     */
+    public SignDocumentDigestRequest(
+            String type,
+            String requestId,
+            String slotId,
+            String documentHash,
+            String documentTitle,
+            String signerRole
+    ) {
+        this(type, requestId, slotId, documentHash, documentTitle, signerRole, null);
+    }
+}
